@@ -1,0 +1,7 @@
+,touch,heat,taste,smell,sound,sight
+touch,NA,0,0,3,21,25
+heat,0,NA,0,2,19,20
+taste,18,1,NA,6,78,120
+smell,1,0,0,NA,0,7
+sound,0,0,0,2,NA,3
+sight,1,1,2,0,22,NA
