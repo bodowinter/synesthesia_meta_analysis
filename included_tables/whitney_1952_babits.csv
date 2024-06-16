@@ -1,0 +1,7 @@
+;touch;heat;taste;smell;hearing;sight
+touch;NA;7;1;2;29;30
+heat;0;NA;1;0;5;7
+taste;1;1;NA;6;7;8
+smell;1;0;1;NA;5;0
+hearing;4;3;2;6;NA;27
+sight;0;0;1;0;37;NA
