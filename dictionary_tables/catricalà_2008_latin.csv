@@ -1,0 +1,6 @@
+;touch;taste;smell;sight;sound
+touch;NA;4;1;6;15
+taste;1;NA;0;2;2
+smell;0;0;NA;0;0
+sight;0;2;0;NA;9
+sound;0;0;0;2;NA
