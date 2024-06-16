@@ -1,0 +1,617 @@
+---
+title: "Meta-analysis of synesthetic metaphor tables"
+author: "Bodo"
+date: "2023-07-10"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This script loads all tables and merges their formats.
+
+# Setup
+
+```{r warning = FALSE, message = FALSE}
+library(tidyverse)     # for data processing and visualization
+```
+
+Show R and package versions for computational reproducibility and reporting in paper:
+
+```{r}
+R.Version()$version.string
+packageVersion('tidyverse')
+```
+
+Load metadata and rename columns as desired:
+
+```{r warning = FALSE, message = FALSE}
+metadata <- read_csv('../metadata.csv') %>% 
+  rename(genre = Genre,
+         language = `Language of data`,
+         source = `Type of data source`,
+         table_title = `Table title`)
+```
+
+Load data with a loop that goes through all file names in the folder and appends everything into one big list object. The vector labeled `all_files` will contain all the file names. The list object `all_tables` will contain all tables, with each list item named by the file name.
+
+```{r warning = FALSE, message = FALSE}
+# Get file names:
+
+all_files <- list.files('../included_tables/')
+
+# Setup empty list for saving:
+
+all_tables <- list()
+
+# Put them all into list:
+
+for (i in seq_along(all_files)) {
+  all_tables[[i]] <- read_delim(str_c('../included_tables/', all_files[i]), delim = ';')
+  
+  if (all_files[i] == 'winter_2019_tokens.csv') {
+    all_tables[[i]] <- read_csv(str_c('../included_tables/', all_files[i]))
+  }
+}
+
+# Change names to file names:
+
+names(all_tables) <- str_replace_all(all_files, '.csv', '')
+
+# Show:
+
+head(all_tables)
+```
+
+We then do the same for the dictionary data:
+
+```{r warning = FALSE, message = FALSE}
+# Get file names:
+
+all_files <- list.files('../dictionary_tables/')
+
+# Setup empty list for saving:
+
+all_dicts <- list()
+
+# Put them all into list:
+
+for (i in seq_along(all_files)) {
+  all_dicts[[i]] <- read_delim(str_c('../dictionary_tables/', all_files[i]), delim = ';')
+}
+
+# Change names to file names:
+
+names(all_dicts) <- str_replace_all(all_files, '.csv', '')
+
+# Show:
+
+head(all_dicts)
+```
+
+
+# Data processing: corpus data
+## Combine touch/heat
+
+First, we need to merge the `touch` and `heat` columns and rows for those tables that distinguish them. We want to map both to `touch` because otherwise these tables are not comparable. The code below extracts each table into a temporary object called `M`. Then, it look sat whether any of the column names contain the label `heat`. If that is the case, the table is processed by adding the heat column onto the touch column, and then the head row onto the touch row. In both cases, the corresponding heat rows and columns are deleted afterwards.
+
+The code also below sends a message to the world outside of the loop if it has detected a table with `heat` in it, just to print that.
+
+```{r}
+for (i in seq_along(all_tables)) {
+  # Check if there is heat/touch, checking for column suffices here:
+  
+  M <- all_tables[[i]]
+  
+  if ('heat' %in% colnames(M)) {
+    # Signal to the world:
+    
+    cat(str_c('I found a table that has heat, it is table number ',
+        i,
+        '... which is file: ', names(all_tables)[i]),
+        '\n')
+    
+    # Add the heat column frequencies to the touch column:
+    
+    M$touch <- M$touch + unlist(M[, 'heat'])
+      
+    # Now that the counts are in the touch column, get rid of the heat column:
+    
+    M <- select(M, -heat)
+    
+    # Add the heat row frequencies to the touch row:
+    
+    M[1, -1] <- M[1, -1] + unlist(M[2, -1])
+    
+    # Now that the counts are in the touch row, get rid of the heat row:
+    
+    M <- filter(M, `...1` != 'heat')
+    
+    # Re-assign to table:
+    
+    all_tables[[i]] <- M
+  }
+}
+```
+
+## Convert tibbles to frequency-only matrices
+
+Let's make all list items into matrices that contain *only* the frequencies. For this, we need to take the first column and make it into row names of the table, so that it isn't its own column.
+
+```{r}
+for (i in seq_along(all_tables)) {
+  # Extract table from list, get rid of first column, and convert to matrix:
+  
+  M <- as.matrix(all_tables[[i]][, -1])
+  
+  # Set row names to column names (they are matched):
+  
+  rownames(M) <- colnames(M)
+  
+  # Override tibble in list with new simplified matrix:
+  
+  all_tables[[i]] <- M
+}
+```
+
+## Invert Day (1996)
+
+Day (1996) seems to have sources and targets inverted in the way the tables are presented. But he discusses the hierarchy-consistent cases and reports a percentage that makes it clear that that it is inverted. They are tables 2 and 3 in the list of tables:
+
+```{r}
+all_tables[2:3]
+```
+
+So those two we need to invert.
+
+```{r}
+all_tables$day_1996_english <- t(all_tables$day_1996_english)
+all_tables$day_1996_german_buddenbrooks <- t(all_tables$day_1996_german_buddenbrooks)
+```
+
+Check whether it worked:
+
+```{r}
+all_tables[2:3]
+```
+
+Looks good.
+
+## Add Doetsch & Kraus together
+
+Doetsch & Kraus separated creative metaphors and conventional metaphors into two tables. Other papers don't make that distinction, so we'll add those two tables. First, let's check them:
+
+```{r}
+all_tables$doetsch_kraus_1992_1
+all_tables$doetsch_kraus_1992_2
+```
+
+Then, let's add them and replace the `doetsch_kraus_1992` in the `all_tables` list with the addition of both.
+
+```{r}
+all_tables$doetsch_kraus_1992_1 <- all_tables$doetsch_kraus_1992_1 +
+  all_tables$doetsch_kraus_1992_2
+```
+
+Now remove the `doetsch_kraus_1992_2` element (the creative metaphors only, as they now have been added to the table).
+
+```{r}
+all_tables[[5]] <- NULL
+```
+
+Check first six tables in the list:
+
+```{r}
+head(all_tables)
+```
+
+Good: the `_2` table isn't there anymore, and the counts have been added.
+
+## Check and exclude unimodal cases
+
+For almost all tables, we don't have unimodal cases. The literature on synesthetic metaphors is generally concerned with whether or not *crossmodal* mappings are hierarchy-consistent or not. We will therefore set those tables that have unimodal cases as well to have `NA` along the diagonal, so that things are consistent with the rest. That said, we'll report the number of unimodal cases first:
+
+```{r}
+for (i in seq_along(all_tables)) {
+  # Extract table from list and transform into matrix object without first column:
+  
+  M <- all_tables[[i]]
+  
+  # If the diagonal has non-NA cases, proceed:
+  
+  if (any(!is.na(diag(M)))) {
+    
+    # Tell the outside world which file and ID:
+    
+    cat(str_c('Found a table with unimodal cases! It is list item ... ',
+              i,
+              '... and file name: ',
+              names(all_tables)[i],
+              '\n'))
+    
+    # Print it:
+    
+    print(M)
+    
+    # Print proportion of unimodal cases out of total:
+    
+    prop <- sum(diag(M)) / sum(M)
+    cat(str_c('For the file ', names(all_tables)[i],
+              ', the proportion of unimodal cases is: ',
+              round(prop, 2),
+              '\n'))
+    
+    # Set to NA:
+    
+    diag(M) <- NA
+    
+    # Re-assign to tibble:
+    
+    all_tables[[i]] <- M
+  }
+}
+```
+
+Winter (2019) is the only one apparently! It's fixed now, and that table now also has `NA` values along the diagonal, for consistency with everything else.
+
+# Data processing: dictionary data
+
+## Convert tibbles to frequency-only matrices
+
+Let's make all list items into matrices that contain *only* the frequencies. For this, we need to take the first column and make it into row names of the table, so that it isn't its own column.
+
+```{r}
+for (i in seq_along(all_dicts)) {
+  # Extract table from list, get rid of first column, and convert to matrix:
+  
+  M <- as.matrix(all_dicts[[i]][, -1])
+  
+  # Set row names to column names (they are matched):
+  
+  rownames(M) <- colnames(M)
+  
+  # Override tibble in list with new simplified matrix:
+  
+  all_dicts[[i]] <- M
+}
+```
+
+## Convert order
+
+The dictionary tables are not ordered consistently.
+
+```{r}
+paissa_french <- all_dicts[['paissa_french_1995']]
+paissa_italian <- all_dicts[['paissa_italian_1995']]
+salzmann <- all_dicts[['salzmann_2014']]
+jo <- all_dicts[['jo_2018']]
+
+# Sort columns correctly:
+
+paissa_french <- paissa_french[, c('touch', 'taste', 'smell', 'hearing', 'sight')]
+paissa_italian <- paissa_italian[, c('touch', 'taste', 'smell', 'hearing', 'sight')]
+salzmann <- salzmann[, c('touch', 'taste', 'smell', 'hearing', 'sight')]
+jo <- jo[, c('touch', 'taste', 'smell', 'hearing', 'sight')]
+
+# Sort rows correctly:
+
+paissa_french <- paissa_french[c('touch', 'taste', 'smell', 'hearing', 'sight'), ]
+paissa_italian <- paissa_italian[c('touch', 'taste', 'smell', 'hearing', 'sight'), ]
+salzmann <- salzmann[c('touch', 'taste', 'smell', 'hearing', 'sight'), ]
+jo <- jo[c('touch', 'taste', 'smell', 'hearing', 'sight'), ]
+
+# Re-assign to list:
+
+all_dicts[['paissa_french_1995']] <- paissa_french
+all_dicts[['paissa_italian_1995']] <- paissa_italian
+all_dicts[['salzmann_2014']] <- salzmann
+all_dicts[['jo_2018']] <- jo
+```
+
+The Catricalà (2008) ones need to be changed such that `sound` is `hearing` instead (for consistency), and the order is off, which sight coming before sound.
+
+```{r}
+# Vector of names:
+
+catricala_names <- names(all_dicts)[1:5] # first five are Catricalà
+
+# Loop through and rename and reorder:
+
+for (i in seq_along(catricala_names)) {
+  # Extract respective table:
+  
+  this_name <- catricala_names[i]
+  this_M <- all_dicts[[this_name]]
+  
+  # Rename columns:
+  
+  colnames(this_M)[colnames(this_M) == 'sound'] <- 'hearing'
+  rownames(this_M)[rownames(this_M) == 'sound'] <- 'hearing'
+  
+  # Re-order:
+  
+  this_M <- this_M[c(1:3, 5, 4), c(1:3, 5, 4)]
+  
+  # Re-assign to list:
+  
+  all_dicts[[this_name]] <- this_M
+}
+
+# Check:
+
+all_dicts
+```
+
+## Additional data cleaning steps
+
+In contrast to the corpus token data in the other script, we don't need to perform any inversions (e.g., Day 1996), add any tables, or exclude unimodal cases as the tables are already set up the right way in these regards. However, for Jo 2018, `hearing` is last, not `sight`, so we need to change the order of the last two rows/columns.
+
+```{r}
+# Extract:
+
+jo_2018 <- all_dicts$jo_2018_korean_compounds
+
+# Change order, columns:
+
+jo_2018 <- jo_2018[, c('touch', 'taste', 'smell', 'hearing', 'sight')]
+
+# Change order, rows:
+
+jo_2018 <- jo_2018[c('touch', 'taste', 'smell', 'hearing', 'sight'), ]
+
+# Put back in:
+
+all_dicts$jo_2018_korean_compounds <- jo_2018
+```
+
+# Data processing: put both together and compute proportions
+
+## Put both together
+
+So that we don't have to repeat each step afterwards, we'll put the corpus and dictionary data together. We will want to compare them later anyway in an integrated analysis. The object is called `both_tables`, because it puts both kind of tables together.
+
+```{r}
+both_tables <- c(all_tables, all_dicts)
+```
+
+## Compute hierarchy consistent cases
+
+In this section, we'll compute the proportion of hierarchy-consistent cases.We will assess the simplified hierarchy as this is the most general one that can be taken to capture the essence of most hierarchies discussed in the literature, i.e., it is a sort of conensus. This hierarchy is:
+
+touch/taste/smell > sight/sound
+
+... allowing for bidirectional sight->sound and sound->sight mappings.
+
+Had a bit of a discussion with Francesca about this, and it's noteworthy that there are multiple ways of doing this. In this section, the first way will be assessed, which is consistent with what I did in Winter (2019), *Sensory Linguistics*. Following this, two more methods will be used: let's call 2) Francesca's "specific mappings", i.e., only "touch>sight", "touch>sound", "taste>sight", "taste>sound", "smell>sight", and "smell>sound" are assessed, so, mappings from the lower to the higher senses, without the corresponding intermediate stages that are part of the approach in this section. And then a third approach is to use 3) source-target ratios.
+
+We will assess the number of hierarchy-consistent cases by defining a matrix that has `TRUE` for all cells that count towards the hierarchy, and `FALSE` for all others. This will be:
+
+```{r}
+hierarchy_matrix <- matrix(data = c(F, T, T, T, T,      # touch row
+                                    F, F, T, T, T,      # taste row
+                                    F, F, F, T, T,      # smell row
+                                    F, F, F, F, T,      # hearing row (mapped onto sight)
+                                    F, F, F, T, F),     # sight row (only lower triangle)
+                           nrow = 5,
+                           ncol = 5,
+                           byrow = TRUE)
+
+# Show to check:
+
+hierarchy_matrix
+```
+
+Then, let's loop through our list again and get the percentages. First we set up an empty tibble, `all_props`, that will contain the output of the loop. This tibble will have a `dataset` column populated with the names from `all_tables`, which are the abbreviated file names without `.csv` tag (excluded above). Then, there'll be an empty `proportion` column filled with `NA`. Finally, to do some weighting later, we will add the total token count into a different column, called `total_tokens`.
+
+We will populate this column within the loop, where for each table we first make it into a matrix object, so that we can use `hierarchy_matrix` for subsetting. So, the general structure `data_matrix[hierarchy_matrix]` will give us all the cells for which frequencies are treated towards the overall count of hierarchy-consistent cases. We can then divide by the sum of the entire table to get the proportion of matching cases. However, we'll have to be careful with those that have the unimodal cases (e.g., Winter). To make everything consistent, we'll not count these cases (along the diagonal of each matrix) to the hierarchy, also because we don't have that information for almost all studies.
+
+```{r}
+# Setup tibble with empty columns:
+
+all_props <- tibble(dataset = names(both_tables),
+                    type = c(rep('corpus', length(all_tables)),
+                             rep('dictionary', length(all_dicts))),
+                    proportion = NA,
+                    hierarchy_tokens = NA,
+                    total_tokens = NA)
+
+# Loop through tables, compute proportions, and save in results table:
+
+for (i in seq_along(both_tables)) {
+  # Extract table from list and transform into matrix object without first column:
+  
+  M <- both_tables[[i]]
+  
+  # Get the hierarchy consistent cases and divide by sum:
+  
+  all_props[i, ]$proportion <- sum(M[hierarchy_matrix]) / sum(M, na.rm = TRUE)
+  all_props[i, ]$hierarchy_tokens <- sum(M[hierarchy_matrix])
+  all_props[i, ]$total_tokens <- sum(M, na.rm = TRUE)
+}
+```
+
+Show the full table:
+
+```{r}
+all_props %>% print(n = Inf)
+```
+
+## Add contribution of individual upwards-moving cells
+
+We want to add the specific counts of all the upwards transfers, from which we can compute all other proportions we're interested in, such as the % hierarchy consistency without touch->sound, and we can also use this to assess the contribution of each cell to the % hierarchy consistency average.
+
+Finally, add the specific counts of all the source-target cells:
+
+```{r}
+all_props$touch_to_taste <- NA
+all_props$touch_to_smell <- NA
+all_props$touch_to_sound <- NA
+all_props$touch_to_sight <- NA
+all_props$taste_to_smell <- NA
+all_props$taste_to_sound <- NA
+all_props$taste_to_sight <- NA
+all_props$smell_to_sound <- NA
+all_props$smell_to_sight <- NA
+all_props$sound_to_sight <- NA
+all_props$sight_to_sound <- NA
+
+for (i in seq_along(both_tables)) {
+  this_M <- both_tables[[i]]
+  
+  all_props[i, ]$touch_to_taste <- this_M['touch', 'taste']
+  all_props[i, ]$touch_to_smell <- this_M['touch', 'smell']
+  all_props[i, ]$touch_to_sound <- this_M['touch', 'hearing']
+  all_props[i, ]$touch_to_sight <- this_M['touch', 'sight']
+  all_props[i, ]$taste_to_smell <- this_M['taste', 'smell']
+  all_props[i, ]$taste_to_sound <- this_M['taste', 'hearing']
+  all_props[i, ]$taste_to_sight <- this_M['taste', 'sight']
+  all_props[i, ]$smell_to_sound <- this_M['smell', 'hearing']
+  all_props[i, ]$smell_to_sight <- this_M['smell', 'sight']
+  all_props[i, ]$sound_to_sight <- this_M['hearing', 'sight']     # reverse mapping
+  all_props[i, ]$sight_to_sound <- this_M['sight', 'hearing']
+}
+```
+
+Sanity checks that the numbers add up correctly:
+
+```{r}
+# Recompute hierarchy token totals from what's in the cell now:
+
+hierarchy_cases <- all_props |> 
+  select(touch_to_taste:sight_to_sound) |> 
+  rowSums()
+
+# Check that they are the same:
+
+all_props$hierarchy_tokens == hierarchy_cases
+```
+
+Ok, this checks out.
+
+## Add metadata to table
+
+We'll need `language`, `source` and `genre` information in the `all_props` table from the `metadata.csv` file.
+
+Get rid of the non-included tables:
+
+```{r}
+metadata <- filter(metadata, `Included in the meta-analysis` != 'no')
+```
+
+Check `genre` column by counting its content, and do the same for `language` and `source`:
+
+```{r}
+# Genre:
+
+metadata %>% 
+  count(genre, sort = TRUE)
+
+# Language:
+
+metadata %>% 
+  count(language, sort = TRUE)
+
+# Source:
+
+metadata %>% 
+  count(source, sort = TRUE)
+```
+
+The majority of "Literary" are also "Poetry", and poetry is literature as well. So we will collapse all the literary and poetry ones, otherwise we end up with too many quite similar small categories. Let's also collapse `unclear`, `NA`, and `Semi-specialized` (only a single case) into a conjoined `other/unclear` category. Let's also make everything lower case:
+
+```{r}
+# Define vector of categories to collapse:
+
+lit_cats <- c('Literary',
+                'Literary/Poetry',
+                'Literary/Poetry&Prose',
+                'Literary/Prose',
+                'Poetry')
+
+other_cats <- c('Semi-specialized',
+                'unclear')
+
+# Exchange the genre column with lumped-together contents:
+
+metadata <- mutate(metadata,
+                   
+                   # Collapse literary categories:
+                   
+                   genre = ifelse(genre %in% lit_cats, # condition
+                                  'literary',          # if true do this
+                                  genre),              # if else keep
+                   
+                   # Collapse other categories:
+                   
+                   genre = ifelse(is.na(genre) | genre %in% other_cats,
+                                  'other/unclear',
+                                  genre),
+                   
+                   # Make lower case:
+                   
+                   genre = str_to_lower(genre))
+```
+
+Do new counts:
+
+```{r}
+metadata %>% 
+  count(genre)
+```
+
+Merge the genre info into the all props table. First, check whether all table titles are also in the metadata, i.e., whether we have metadata for each table.
+
+```{r}
+all(names(both_tables) %in% metadata$table_title)
+```
+
+Yes, all names of the list of all tables also have a corresponding table in the `metadata` tibble, so things can be matched.
+
+```{r}
+all_props <- left_join(all_props,
+                       select(metadata, table_title, genre, source, language),
+                       by = c('dataset' = 'table_title')) |> 
+  relocate(genre:language, .after = type)
+
+# Check that it worked:
+
+all_props
+```
+
+For the dictionary data, we'll se genre to `NA`:
+
+```{r}
+all_props <- mutate(all_props,
+                    genre = if_else(type == 'dictionary', NA, genre))
+```
+
+Save it in the `additional_data` folder, so that the table includes the metadata:
+
+```{r}
+write_csv(all_props,
+          '../additional_data/all_proportions.csv')
+```
+
+Let's also write the `both_tables` list as an R object into that folder:
+
+```{r}
+save(both_tables,
+     file = '../additional_data/all_included_tables_list.RData')
+```
+
+# Final words
+
+This completes all preprocessing. There'll be a few things we have to compute in the other scripts on the fly, but with the proportions in place for the first analysis (% hierarchy consistency) and the list of all tables nice and clean ready for analyses 2 (source/target ratios) and 3 (specific cells).
+
+- The `all_props` object is input to `analysis1_hierarchy_consistency.Rmd`
+- The `both_tables` object is input to `analysis2_source_target_ratios.Rmd` and `analysis3_specific_cells.Rmd`
+
+
+

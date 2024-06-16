@@ -1,0 +1,991 @@
+---
+title: "Meta-analysis of synesthetic metaphor tables"
+author: "Bodo"
+date: "2023-07-10"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This script looks at percent hierarchy consistency. Since this is our first analysis, we'll also spend some time checking datasets to report overall statistics in the paper.
+
+# Setup
+
+```{r warning = FALSE, message = FALSE}
+library(tidyverse)     # for data processing and visualization
+library(brms)          # for fitting bayesian models
+library(tidybayes)     # for spread_draws()
+```
+
+Show R and package versions for computational reproducibility and reporting in paper:
+
+```{r}
+packageVersion('tidybayes')
+```
+
+Load the `both_tables` list that has been created in the `table_preprocessing.Rmd` file.
+
+```{r warning = FALSE, message = FALSE}
+# List of all tables:
+
+load('../additional_data/all_included_tables_list.RData')
+```
+
+Show 5 random rows each to get an overview:
+
+```{r}
+# List of all tables:
+
+both_tables[sample(1:length(both_tables), 5)]
+```
+
+Load metadata and rename columns as desired:
+
+```{r warning = FALSE, message = FALSE}
+metadata <- read_csv('../metadata.csv') %>% 
+  rename(genre = Genre,
+         language = `Language of data`,
+         source = `Type of data source`,
+         table_title = `Table title`)
+```
+
+# Compute source/target ratios
+
+Let's compute the source-target ratios. This is a fairly intuitive quantity: for touch, for example, we look at the row totals — how often it is used as a source — and divide this by the column totals — how often it us used as a target. The corresponding ratio quantifies how much more something is used as a source.
+
+```{r}
+# Setup tibble with empty columns:
+
+ratios <- tibble(dataset = names(both_tables),
+                 touch = NA,
+                 taste = NA,
+                 smell = NA,
+                 sight = NA,
+                 sound = NA)
+
+# Loop through tables, compute proportions, and save in results table:
+
+for (i in seq_along(both_tables)) {
+  # Extract table from list and transform into matrix object without first column:
+  
+  M <- both_tables[[i]]
+  
+  # All ratios:
+  
+  these_ratios <- rowSums(M, na.rm = TRUE) / colSums(M, na.rm = TRUE)
+  
+  # Get the hierarchy consistent cases and divide by sum:
+  
+  ratios[i, ]$touch <- these_ratios['touch']
+  ratios[i, ]$taste <- these_ratios['taste']
+  ratios[i, ]$smell <- these_ratios['smell']
+  ratios[i, ]$sound <- these_ratios['hearing']
+  ratios[i, ]$sight <- these_ratios['sight']
+}
+```
+
+Check table:
+
+```{r}
+ratios
+```
+
+The `Inf` cases result from division by zero for cases where something is only used as a source, but never as a target (= 0). Let's set these to `NA` as the true ratio cannot be known in this case.
+
+```{r}
+# Define helper function:
+
+inf_to_NA <- function(x) ifelse(is.infinite(x), NA, x)
+
+# Apply this function to all numeric ("double") columns:
+
+ratios <- ratios %>%
+  mutate(across(where(is.double), inf_to_NA))
+
+# Check:
+
+ratios
+```
+
+Seems to have worked.
+
+Make that into a long format table so we can plot it:
+
+```{r}
+ratios_long <- ratios %>% 
+  pivot_longer(cols = touch:sound,
+               names_to = 'modality',
+               values_to = 'ratio')
+
+# Check:
+
+ratios_long
+```
+
+We'll later use log ratios as well for plotting (ratios can easily get skewed if the denominators are small, making it hard to see patterns).
+
+```{r}
+ratios_long <- mutate(ratios_long,
+                      log_ratio = log(ratio),
+                      log_ratio = inf_to_NA(log_ratio))
+```
+
+# Ratio averages and plots
+
+Check averages:
+
+```{r}
+ratios_long %>% 
+  group_by(modality) %>% 
+  summarize(mean_ratio = mean(ratio, na.rm = TRUE),
+            log_ratio = mean(log_ratio, na.rm = TRUE))
+```
+
+Make the order of the `modality` factor roughly correspond to the hierarchy for plotting purposes:
+
+```{r}
+# Define vector with desired order:
+
+level_order <- c('touch', 'taste', 'smell', 'sight', 'sound')
+
+# Make column into factor with those levels:
+
+ratios_long <- mutate(ratios_long,
+                      modality = factor(modality,
+                                        levels = level_order))
+```
+
+Make a plot of this:
+
+```{r}
+# Core of plot:
+
+ratio_p <- ratios_long %>% 
+  ggplot(aes(x = modality,
+             y = log_ratio,
+             fill = modality)) +
+  geom_hline(yintercept = 0, linetype = 'dashed') +
+  geom_boxplot(width = 0.5)
+
+# Add annotations, axes, labels to plot:
+
+ratio_p <- ratio_p +
+  xlab(NULL) +
+  ylab('Log source/target ratio') +
+  scale_fill_viridis_d(option = 'D') +
+  scale_y_continuous(limits = c(-6, 6),
+                     breaks = seq(-6, 6, 2))
+
+# Cosmetic tweaking:
+
+ratio_p <- ratio_p +
+  theme_classic() +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(face = 'bold'),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+# Show plot in markdown and also save externally outside of R:
+
+ratio_p
+ggsave(plot = ratio_p,
+       filename = '../figures/pdf/source_target_ratios.pdf',
+       width = 5.2, height = 4.5)
+ggsave(plot = ratio_p,
+       filename = '../figures/png/source_target_ratios.png',
+       width = 5.2, height = 4.5)
+```
+
+# Bayesian model of ratios
+
+How are the log ratios themselves distributed? This could inform a choice of model.
+
+```{r}
+ratios_long %>% 
+  ggplot(aes(x = log_ratio)) +
+  geom_density(fill = 'purple') +
+  theme_classic()
+```
+
+Ok, I wouldn't be too opposed to using a Gaussian model in this case as a first pass, and see how far we can go with this. We should add the language metadata to the table though so that we can have a language random effect.
+
+```{r}
+ratios_long <- left_join(ratios_long,
+                         select(metadata, table_title, genre, language),
+                         by = c('dataset' = 'table_title'))
+```
+
+Set priors. Since we'll have random slopes for this model (each language has five data points now, one per modality, so we can fit by-language modality random slopes), we now also need LKJ priors for the random effects correlation matrix.
+
+```{r}
+my_priors <- c(prior(normal(0, 1), class = Intercept),
+               prior(normal(0, 1), class = b),
+               prior(student_t(3, 0, 2.5), class = sd), # df = 3, mu = 0, sigma = 2.5
+               prior(lkj(2), class = cor))
+```
+
+Fit a Gaussian model then:
+
+```{r eval = TRUE}
+ratio_mdl <- brm(log_ratio ~ 
+                  
+                  # Fixed effects:
+                  
+                  1 + modality +
+                  
+                  # Random effects:
+                  
+                  (1 + modality|language),
+                
+                data = ratios_long,
+                family = gaussian,
+                
+                # Priors:
+                
+                prior = my_priors,
+                
+                # MCMC settings:
+                
+                seed = 42,
+                cores = 4,
+                chains = 4,
+                iter = 6000,
+                warmup = 4000,
+                control = list(adapt_delta = 0.99),
+                save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(ratio_mdl, file = '../models/ratio_model.RData')
+```
+
+Load the pre-compiled model:
+
+```{r}
+load('../models/ratio_model.RData')
+```
+
+Assess whether this is a plausible data-generating process:
+
+```{r}
+pp_check(ratio_mdl, ndraws = 100)
+```
+
+Looks quite good!
+
+Check the model:
+
+```{r}
+ratio_mdl
+```
+
+Touch is the reference level in the intercept. We can test whether taste, smell, sight and sound differ in terms of their source-target ratios, and how uncertain those differences are.
+
+```{r}
+hypothesis(ratio_mdl, 'modalitytaste > 0')
+hypothesis(ratio_mdl, 'modalitysmell < 0')
+hypothesis(ratio_mdl, 'modalitysight < 0')
+hypothesis(ratio_mdl, 'modalitysound < 0')
+```
+
+We can also look at whether the smell coefficient differed reliably from the sight and sound coefficients, and from each other.
+
+```{r}
+hypothesis(ratio_mdl, 'modalitysmell < modalitytaste')
+hypothesis(ratio_mdl, 'modalitytaste > modalitysmell')
+hypothesis(ratio_mdl, 'modalitysmell < modalitysight')
+hypothesis(ratio_mdl, 'modalitysmell > modalitysound')
+hypothesis(ratio_mdl, 'modalitysight > modalitysound')
+```
+
+Or whether each condition is above zero.
+
+```{r}
+hypothesis(ratio_mdl, 'Intercept > 0') # touch
+hypothesis(ratio_mdl, 'Intercept + modalitytaste  > 0') # taste
+hypothesis(ratio_mdl, 'Intercept + modalitysmell  < 0') # smell
+hypothesis(ratio_mdl, 'Intercept + modalitysight  < 0') # sight
+hypothesis(ratio_mdl, 'Intercept + modalitysound  < 0') # sound
+```
+
+We can compare this to a model that only knows about whether the sense is lower or higher, thus collapsing sight/sound under higher and touch/taste/smell under lower. If this model performs worse, then this is evidence that it's better to look at specific modalities.
+
+```{r}
+ratios_long <- ratios_long %>% 
+  mutate(hierarchy = ifelse(modality %in% c('sight', 'sound'),
+                            'higher', # if
+                            'lower')) # else
+
+# Check:
+
+ratios_long
+```
+
+The new `hierarchy` column encodes just this information. We can refit the model with `hierarchy` rather than `modality` as predictor.
+
+```{r eval = TRUE}
+ratio_hierarchy_mdl <- brm(log_ratio ~ 
+                  
+                  # Fixed effects:
+                  
+                  1 + hierarchy +
+                  
+                  # Random effects:
+                  
+                  (1 + hierarchy|language),
+                
+                data = ratios_long,
+                family = gaussian,
+                
+                # Priors:
+                
+                prior = my_priors,
+                
+                # MCMC settings:
+                
+                seed = 42,
+                cores = 4,
+                chains = 4,
+                iter = 6000,
+                warmup = 4000,
+                control = list(adapt_delta = 0.99),
+                save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(ratio_hierarchy_mdl,
+     file = '../models/ratio_hierarchy_model.RData')
+```
+
+Load the pre-compiled model:
+
+```{r}
+load('../models/ratio_hierarchy_model.RData')
+```
+
+The intercept is the ratio for touch, which is the reference level here. We can then test the hypothesis that the modality-specific model is better than the coarser low/high model. We can do this two ways, one using Bayes factors, another one using LOO-CV (leave-one-out cross-validation). Let's do the latter first:
+
+```{r eval = TRUE}
+# Individual LOO-ICs:
+
+ratio_loo <- loo(ratio_mdl, moment_match = TRUE)
+ratio_hierarchy_loo <- loo(ratio_hierarchy_mdl, moment_match = TRUE)
+
+# Save:
+
+save(ratio_loo, file = '../models/ratio_loo.RData')
+save(ratio_hierarchy_loo, file = '../models/ratio_hierarchy_loo.RData')
+
+# Compare:
+
+ratio_loo_comparison <- loo_compare(ratio_loo, ratio_hierarchy_loo)
+
+
+save(ratio_loo_comparison, file = '../models/ratio_loo_comparison.RData')
+```
+
+Load and show:
+
+```{r}
+load('../models/ratio_loo.RData')
+load('../models/ratio_hierarchy_loo.RData')
+load('../models/ratio_loo_comparison.RData')
+
+# Show:
+
+ratio_loo
+ratio_hierarchy_loo
+ratio_loo_comparison
+```
+
+The ratio model performs best, i.e., the modality-specific model is better in terms of cross-validation accuracy / it would generalize to unseen data better.
+
+The difference in R-squared is what?
+
+```{r}
+# Bayes R2:
+
+R2_ratio_mdl <- bayes_R2(ratio_mdl)
+R2_ratio_hierarchy_mdl <- bayes_R2(ratio_hierarchy_mdl)
+
+# Show:
+
+R2_ratio_mdl
+R2_ratio_hierarchy_mdl
+
+# Difference:
+
+R2_ratio_mdl[1] - R2_ratio_hierarchy_mdl[1]
+```
+
+45.6% more explained variance.
+
+# New plot with model
+
+Get the posterior samples from the model:
+
+```{r}
+posts <- ratio_mdl |> 
+  spread_draws(b_Intercept, b_modalitytaste,
+               b_modalitysmell, b_modalitysight,
+               b_modalitysound)
+```
+
+Fill out the regression equation for all five cells of the stats:
+
+```{r}
+posts <- posts |> 
+  mutate(taste = b_Intercept + b_modalitytaste,
+         smell = b_Intercept + b_modalitysmell,
+         sight = b_Intercept + b_modalitysight,
+         sound = b_Intercept + b_modalitysound) |> 
+  rename(touch = b_Intercept) |> 
+  select(-(b_modalitytaste:b_modalitysound),
+         -(.chain:.draw))
+
+# Show:
+
+posts
+```
+
+Compute relevant stats... need to make it long format for that:
+
+```{r}
+posts_long <- posts |>
+  pivot_longer(cols = touch:sound,
+               names_to = 'modality',
+               values_to = 'log_ratio') |> 
+  arrange(modality)
+
+# Show long format:
+
+posts_long
+```
+
+Compute 95% credible interval and means:
+
+```{r}
+fixefs <- posts_long |> 
+  group_by(modality) |> 
+  summarize(lower_CI = quantile(log_ratio, 0.025),
+            upper_CI = quantile(log_ratio, 0.975),
+            estimate = mean(log_ratio))
+
+# Show:
+
+fixefs
+```
+
+Make a beeswarm or violin plot:
+
+```{r}
+# Core of plot:
+
+ratio_p <- ratios_long %>% 
+  ggplot(aes(x = modality)) +
+  geom_hline(yintercept = 0, linetype = 'dashed') +
+  geom_violin(aes(y = log_ratio),
+              alpha = 0,
+              color = NA) +
+  geom_violin(aes(fill = modality,
+                    y = log_ratio),
+              alpha = 0.7,
+              linewidth = 0.3) +
+  geom_errorbar(data = fixefs,
+                mapping = aes(x = modality,
+                              ymin = lower_CI, ymax = upper_CI),
+                linewidth = 0.45,
+                width = 0.15) +
+  geom_point(pch = 15, size = 2.2,
+             data = fixefs,
+             mapping = aes(y = estimate))
+
+# Add annotations, axes, labels to plot:
+
+ratio_p <- ratio_p +
+  coord_cartesian(clip = 'off') +
+  xlab(NULL) +
+  ylab('Log source/target ratio') +
+  scale_fill_viridis_d(option = 'D') +
+  scale_y_continuous(limits = c(-6, 6),
+                     breaks = seq(-6, 6, 2)) +
+  annotate('text',
+           label = 'source preference',
+           x = 5.55, hjust = 0.5,
+           y = (0.55 + 5.2) / 2, size = 2.3,
+           angle = 90) +
+  annotate('text',
+           label = 'target preference',
+           x = 5.55, hjust = 0.5, angle = 90,
+           y = (-0.55 + -5.2) / 2, size = 2.3) +
+  annotate('segment', y = 0.55, yend = 5.2,
+           x = 5.65, xend = 5.65,
+           arrow = arrow(type = 'closed', length = unit(0.036, 'npc'))) +
+  annotate('segment', y = -0.55, yend = -5.2,
+           x = 5.65, xend = 5.65,
+           arrow = arrow(type = 'closed', length = unit(0.036, 'npc')))
+
+# Cosmetic tweaking:
+
+ratio_p <- ratio_p +
+  theme_classic() +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(face = 'bold'),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.y = element_text(margin = margin(r = 10)),
+        plot.margin = margin(r = 20))
+
+# Show plot in markdown and also save externally outside of R:
+
+ratio_p
+ggsave(plot = ratio_p,
+       filename = '../figures/pdf/source_target_ratios_violin_with_95CI.pdf',
+       width = 5.2, height = 3.5)
+ggsave(plot = ratio_p,
+       filename = '../figures/png/source_target_ratios_violin_with_95CI.png',
+       width = 5.2, height = 3.5)
+```
+
+# Hypotheses tests for conditions
+
+With the new `posts` object, we can easily perform hypothesis tests to look at which modalities differ reliably in their source/target ratio means.
+
+```{r}
+# Touch against rest:
+
+sum(with(posts, touch > taste)) / nrow(posts)
+sum(with(posts, touch > smell)) / nrow(posts)
+sum(with(posts, touch > sight)) / nrow(posts)
+sum(with(posts, touch > sound)) / nrow(posts)
+
+# Taste against rest:
+
+sum(with(posts, taste > smell)) / nrow(posts)
+sum(with(posts, taste > sight)) / nrow(posts)
+sum(with(posts, taste > sound)) / nrow(posts)
+
+# Smell against rest:
+
+sum(with(posts, smell < sight)) / nrow(posts) # smell lower than sight
+sum(with(posts, smell > sound)) / nrow(posts)
+
+# Sight against rest:
+
+sum(with(posts, sight > sound)) / nrow(posts)
+```
+
+# Calculate target entropy
+
+Let's calculate the entropy to get a measure of the diversity of targets across cells. We will add +1 to get rid of `Inf` for those cases that are zero. Since this is applied to *all* cells, it shouldn't bias the results with respect to any one modality.
+
+```{r}
+# Setup tibble with empty columns:
+
+entropies <- tibble(dataset = names(both_tables),
+                    touch = NA,
+                    taste = NA,
+                    smell = NA,
+                    sight = NA,
+                    sound = NA)
+
+# Vector of modalities:
+
+mods <- c('touch', 'taste', 'smell', 'sight', 'sound')
+
+# Loop through tables, compute proportions, and save in results table:
+
+for (i in seq_along(both_tables)) {
+  # Extract table from list and transform into matrix object without first column:
+  
+  M <- both_tables[[i]]
+  
+  # All ratios:
+  
+  for (j in 1:nrow(M)) {
+    this_row <- M[j, ]
+    this_row <- this_row[!is.na(this_row)]
+    this_row <- this_row + 1 # to get rid of Inf for log
+    ps <- this_row / sum(this_row)
+    entropies[i, mods[j]] <- sum(ps * log(ps)) * -1
+  }
+}
+```
+
+Make that into a long format table so we can plot it:
+
+```{r}
+entro_df <- entropies %>% 
+  pivot_longer(cols = touch:sound,
+               names_to = 'modality',
+               values_to = 'entropy')
+
+# Check:
+
+entro_df
+```
+
+Check averages:
+
+```{r}
+entro_df %>% 
+  group_by(modality) %>% 
+  summarize(M = mean(entropy, na.rm = TRUE)) |> 
+  arrange(desc(M))
+```
+
+Make the order of the `modality` factor roughly correspond to the hierarchy for plotting purposes:
+
+```{r}
+# Define vector with desired order:
+
+level_order <- c('touch', 'taste', 'smell', 'sight', 'sound')
+
+# Make column into factor with those levels:
+
+entro_df <- mutate(entro_df,
+                     modality = factor(modality,
+                                       levels = level_order))
+```
+
+Make a plot of this:
+
+```{r}
+# Core of plot:
+
+entro_p <- entro_df %>% 
+  ggplot(aes(x = modality,
+             y = entropy,
+             fill = modality)) +
+  geom_boxplot(width = 0.5)
+
+# Add annotations, axes, labels to plot:
+
+entro_p <- entro_p +
+  xlab(NULL) +
+  ylab('Entropies') +
+  scale_fill_viridis_d(option = 'D') +
+  scale_y_continuous(limits = c(0, 2),
+                     breaks = seq(0, 2, 0.25))
+
+# Cosmetic tweaking:
+
+entro_p <- entro_p +
+  theme_classic() +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(face = 'bold'),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+# Show plot in markdown and also save externally outside of R:
+
+entro_p
+ggsave(plot = entro_p,
+       filename = '../figures/pdf/target_entropies.pdf',
+       width = 5.2, height = 4.5)
+ggsave(plot = entro_p,
+       filename = '../figures/png/target_entropies.png',
+       width = 5.2, height = 4.5)
+```
+
+Interesting: taste and smell have the most diffuse profile of targets. Sound the least diffuse — it attaches almost exclusively to sound. Touch has relatively lower entropy than taste and smell, meaning that it tends to latch on to a less diverse range of cells. In fact, the entropy is quite similar to that of sight, probably because what is touch->sound for touch is sight->sound for sight, i.e., they have a distribution that is similarly latched onto a particular modality as preferred target.
+
+Merge metadata back in:
+
+```{r}
+entro_df <- left_join(entro_df,
+                      select(metadata, table_title, genre, language),
+                      by = c('dataset' = 'table_title'))
+```
+
+Set priors. We'll make the normal prior for the coefficients a bit more narrow given that the entropy scale is very small.
+
+```{r}
+my_priors <- c(prior(normal(0, 1), class = Intercept),
+               prior(normal(0, 0.5), class = b),
+               prior(student_t(3, 0, 2.5), class = sd), # df = 3, mu = 0, sigma = 2.5
+               prior(lkj(2), class = cor))
+```
+
+Fit a Gaussian model then:
+
+```{r eval = TRUE}
+entropy_mdl <- brm(entropy ~ 
+                     # Fixed effects:
+                     
+                     1 + modality +
+                     
+                     # Random effects:
+                     
+                     (1 + modality|language),
+                   
+                   data = entro_df,
+                   family = gaussian,
+                   
+                   # Priors:
+                
+                   prior = my_priors,
+
+                   # MCMC settings:
+                   
+                   seed = 42, cores = 4, chains = 4,
+                   iter = 6000, warmup = 4000,
+                   control = list(adapt_delta = 0.99),
+                   save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(entropy_mdl, file = '../models/entropy_mdl.RData')
+```
+
+Load the pre-compiled model:
+
+```{r}
+load('../models/entropy_mdl.RData')
+```
+
+Assess whether this is a plausible data-generating process:
+
+```{r}
+pp_check(entropy_mdl, ndraws = 100)
+```
+
+Looks OK.
+
+Check the model:
+
+```{r}
+entropy_mdl
+```
+
+Get the predictions:
+
+```{r}
+entropy_preds <- entropy_mdl |> 
+  spread_draws(b_Intercept, b_modalitytaste, b_modalitysmell,
+               b_modalitysight, b_modalitysound) |> 
+  select(-(.chain:.draw)) |> 
+  mutate(touch = b_Intercept,
+         taste = b_Intercept + b_modalitytaste,
+         smell = b_Intercept + b_modalitysmell,
+         sight = b_Intercept + b_modalitysight,
+         sound = b_Intercept + b_modalitysound) |> 
+  select(-(b_Intercept:b_modalitysound))
+
+# Show:
+
+entropy_preds
+```
+
+Perform hypotheses tests with these posterior samples:
+
+```{r}
+sum(entropy_preds$touch < entropy_preds$taste) / nrow(entropy_preds)
+sum(entropy_preds$touch < entropy_preds$smell) / nrow(entropy_preds)
+```
+
+We are very certain that taste and smell attach to a wider range of targets than touch.
+
+Next, let's compare touch to the "higher" senses of sight and sound:
+
+```{r}
+sum(entropy_preds$touch > entropy_preds$sight) / nrow(entropy_preds)
+sum(entropy_preds$touch > entropy_preds$sound) / nrow(entropy_preds)
+```
+
+There is no difference between touch and sight, but touch has more target modality entropy than sound: it attaches to a wider range of targets.
+
+Do taste and smell differ from each other?
+
+```{r}
+sum(entropy_preds$taste < entropy_preds$smell) / nrow(entropy_preds)
+```
+
+Can't be that certain about any difference.
+
+What about taste and the "higher" senses?
+
+```{r}
+sum(entropy_preds$taste > entropy_preds$sight) / nrow(entropy_preds)
+sum(entropy_preds$taste > entropy_preds$sound) / nrow(entropy_preds)
+```
+
+We can be very certain it has a bigger entropy. Same for smell.
+
+```{r}
+sum(entropy_preds$smell > entropy_preds$sight) / nrow(entropy_preds)
+sum(entropy_preds$smell > entropy_preds$sound) / nrow(entropy_preds)
+```
+
+Yup, same.
+
+And do we have a lot of certainty in sight having higher entropies than sound?
+
+```{r}
+sum(entropy_preds$sight > entropy_preds$sound) / nrow(entropy_preds)
+```
+
+Yes.
+
+# Entropy plot
+
+Get the posterior samples from the model:
+
+```{r}
+posts <- entropy_mdl |> 
+  spread_draws(b_Intercept, b_modalitytaste,
+               b_modalitysmell, b_modalitysight,
+               b_modalitysound)
+```
+
+Fill out the regression equation for all five cells of the stats:
+
+```{r}
+posts <- posts |> 
+  mutate(taste = b_Intercept + b_modalitytaste,
+         smell = b_Intercept + b_modalitysmell,
+         sight = b_Intercept + b_modalitysight,
+         sound = b_Intercept + b_modalitysound) |> 
+  rename(touch = b_Intercept) |> 
+  select(-(b_modalitytaste:b_modalitysound),
+         -(.chain:.draw))
+
+# Show:
+
+posts
+```
+
+Compute relevant stats... need to make it long format for that:
+
+```{r}
+posts_long <- posts |>
+  pivot_longer(cols = touch:sound,
+               names_to = 'modality',
+               values_to = 'log_ratio') |> 
+  arrange(modality)
+
+# Show long format:
+
+posts_long
+```
+
+Compute 95% credible interval and means:
+
+```{r}
+fixefs <- posts_long |> 
+  group_by(modality) |> 
+  summarize(lower_CI = quantile(log_ratio, 0.025),
+            upper_CI = quantile(log_ratio, 0.975),
+            estimate = mean(log_ratio))
+
+# Show:
+
+fixefs
+```
+
+Make a beeswarm or violin plot:
+
+```{r}
+# Core of plot:
+
+entro_p <- entro_df %>% 
+  ggplot(aes(x = modality)) +
+  geom_violin(aes(y = entropy),
+              alpha = 0,
+              color = NA) +
+  geom_violin(aes(fill = modality,
+                    y = entropy),
+              alpha = 0.7,
+              linewidth = 0.3) +
+  geom_errorbar(data = fixefs,
+                mapping = aes(x = modality,
+                              ymin = lower_CI, ymax = upper_CI),
+                linewidth = 0.45,
+                width = 0.15) +
+  geom_point(pch = 15, size = 2.2,
+             data = fixefs,
+             mapping = aes(y = estimate))
+NULL
+
+# Add annotations, axes, labels to plot:
+
+entro_p <- entro_p +
+  xlab(NULL) +
+  ylab('Diversity of targets (entropy)') +
+  scale_fill_viridis_d(option = 'D') +
+  scale_y_continuous(limits = c(0, 1.75),
+                     breaks = seq(0, 1.75, 0.25))
+
+# Cosmetic tweaking:
+
+entro_p <- entro_p +
+  theme_classic() +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(face = 'bold'),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+# Show plot in markdown and also save externally outside of R:
+
+entro_p
+ggsave(plot = entro_p,
+       filename = '../figures/pdf/entropies_violin_with_95CI.pdf',
+       width = 5.2, height = 3.5)
+ggsave(plot = entro_p,
+       filename = '../figures/png/entropies_violin_with_95CI.png',
+       width = 5.2, height = 3.5)
+```
+
+# Correlation between ratio and entropy
+
+Check that the two can be merged:
+
+```{r}
+all(ratios_long$dataset == entro_df$dataset)
+all(ratios_long$modality == entro_df$modality)
+```
+
+Correlate the two:
+
+```{r}
+both_df <- bind_cols(select(ratios_long, dataset, language, modality, ratio, log_ratio),
+                     select(entro_df, entropy))
+```
+
+See whether they are correlated, simple correlation that ignores all dependencies:
+
+```{r}
+with(both_df,
+     cor.test(log_ratio, entropy, method = 'pearson'))
+```
+
+What about the averages, are they correlated?
+
+```{r}
+both_tab <- both_df |> 
+  group_by(modality) |> 
+  summarize(mean_ratio = mean(log_ratio, na.rm = TRUE),
+            mean_entro = mean(entropy))
+
+both_tab
+
+with(both_tab, cor.test(mean_ratio, mean_entro))
+```
+
+Somewhat correlated.
+
+This completes this analysis.
+
+
+

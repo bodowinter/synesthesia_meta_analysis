@@ -1,0 +1,1499 @@
+---
+title: "Meta-analysis of synesthetic metaphor tables"
+author: "Bodo"
+date: "2023-07-10"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This script looks at percent hierarchy consistency. Since this is our first analysis, we'll also spend some time checking datasets to report overall statistics in the paper.
+
+# Setup
+
+```{r warning = FALSE, message = FALSE}
+library(tidyverse)     # for data processing and visualization
+library(brms)          # for fitting bayesian models
+library(patchwork)     # for multi-plot arrays
+library(effsize)       # for Cohen's d
+```
+
+Show R and package versions for computational reproducibility and reporting in paper:
+
+```{r}
+R.Version()$version.string
+packageVersion('tidyverse')
+packageVersion('brms')
+packageVersion('patchwork')
+packageVersion('effsize')
+```
+
+Load the output files that have been created in the `table_preprocessing.Rmd` file. When loading `all_included_tables_list.RData`, the R object called `both_tables` will be available:
+
+```{r warning = FALSE, message = FALSE}
+# Proportions spreadsheet:
+
+props <- read_csv('../additional_data/all_proportions.csv')
+
+# List of all tables:
+
+load('../additional_data/all_included_tables_list.RData')
+```
+
+Show 5 random rows each to get an overview:
+
+```{r}
+# Proportions spreadsheet:
+
+sample_n(props, 5)
+
+# List of all tables:
+
+both_tables[sample(1:length(both_tables), 5)]
+```
+
+# Overview
+
+How many tables do we have in total in this analysis?
+
+```{r}
+props %>% 
+  count(language, sort = TRUE) |> 
+  summarize(total = sum(n))
+```
+
+Check what is the content of the `props` tibble in terms of `genre`, `language`, and `source`:
+
+```{r}
+# Genre:
+
+props %>% 
+  count(genre, sort = TRUE)
+
+# Language:
+
+props %>% 
+  count(language, sort = TRUE)
+
+# Source:
+
+props %>% 
+  count(source, sort = TRUE) |>
+  print(n = Inf)
+```
+
+The `NA`s for `genre` are due to the dictionary cases, which don't have a genre.
+
+One thing to note is that there's only 4 studies that have "repeated measures", so to say, i.e., except for these four studies, every paper has only one table. This will make it next-to-nigh impossible, and also a bit pointless, to fit a random effect for `source`.
+
+## Overview number of tokens
+
+Let's check how many data points we have per table?
+
+```{r}
+props |> 
+  select(source, total_tokens) |>
+  arrange(desc(total_tokens)) |> 
+  print(n = Inf)
+```
+
+What is the average number of data points?
+
+```{r}
+props |> 
+  summarize(mean = mean(total_tokens),
+            median = median(total_tokens))
+```
+
+A mean of 771 and a median of 163. Let's look at the distribution of tokens:
+
+```{r}
+# Define relative text size so it can all be changed in one go:
+
+text_size <- 3.4
+
+# Plot core:
+
+token_p <- props |> 
+  ggplot(aes(x = total_tokens)) +
+  geom_density(fill = 'purple')
+
+# Axes, labels and annotations:
+
+token_p <- token_p +
+  coord_cartesian(clip = 'off') + # to avoid clipping of Zhao et al. (2019)
+  annotate('text',
+           x = 8082,
+           y = 0.00029,
+           label = 'Zhao et al. (2019)',
+           size = text_size) +
+  annotate('text',
+           x = (5880 + 5693) / 2, # average of both datasets
+           y = 0.00029 + 0.0002 + 0.00013,
+           label = 'Kumcu (2021) & Winter (2019)',
+           size = text_size) +
+  annotate('segment',
+           x = (5880 + 5693) / 2, xend = (5880 + 5693) / 2,
+           y = 0.00029 + 0.0001 + 0.0001,
+           yend = 0.0002,
+           arrow = arrow(type = 'closed', length = unit(0.015, 'npc'))) +
+  annotate('text',
+           x = 2423,
+           y = 0.00029,
+           label = 'Doetsch Kraus (1992)',
+           size = text_size) +
+  annotate('text',
+           x = 1261,
+           y = 0.00029 + 0.0002 + 0.00013,
+           label = 'Day (1996)',
+           size = text_size) +
+  annotate('segment',
+           x = 1261, xend = 1261,
+           y = 0.00029 + 0.0001 + 0.0001,
+           yend = 0.0002,
+           arrow = arrow(type = 'closed', length = unit(0.015, 'npc'))) +
+  annotate('text',
+           x = 1520,
+           y = 0.0015,
+           label = 'all other datasets',
+           size = text_size,
+           hjust = 0) +
+  annotate('segment',
+           x = 1500, xend = 300,
+           y = 0.0015, yend = 0.0015,
+           arrow = arrow(type = 'closed', length = unit(0.015, 'npc'))) +
+  xlab('Number of tokens') +
+  ylab('Density') +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(0, 0.00338),
+                     breaks = seq(0, 0.004, 0.001))
+
+# Cosmetics:
+
+token_p <- token_p +
+  theme_classic() +
+  theme(axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.y = element_text(margin = margin(r = 10)),
+        axis.title.x = element_text(margin = margin(t = 10)),
+        plot.margin = margin(r = 30, l = 10,
+                             t = 10, b = 10))
+
+# Show and save:
+
+token_p
+ggsave('../figures/pdf/token_distribution.pdf', plot = token_p,
+       width = 6.9, height = 3.5)
+ggsave('../figures/png/token_distribution.png', plot = token_p,
+       width = 6.9, height = 3.5)
+```
+
+## Overview bar plots of data by language in analysis
+
+Add language family information for display purposes:
+
+```{r}
+family_df <- tibble(language = unique(props$language))
+
+# Show:
+
+family_df
+```
+
+Add a column with family:
+
+```{r}
+family_df$family <- c('Indo-European', # English
+                      'Indo-European', # German
+                      'Indo-European', # Spanish
+                      'Isolate (Korean)', # Korean
+                      'Turkic', # Turkish
+                      'Indo-European', # Romanian
+                      'Indo-European', # Italian
+                      'Indo-European', # French
+                      'Finno-Ugric', # Hungarian
+                      'Sino-Tibetan', # Chinese
+                      'Indo-European', # Ancient Greek
+                      'Indo-European', # Latin
+                      'Mayan',
+                      'Isolate (Japanese)') # Tzotzil
+```
+
+Merge this back into the `props` tibble:
+
+```{r}
+props <- left_join(props,
+                   family_df)
+```
+
+How many datasets are Indo-European?
+
+```{r}
+props |> 
+  count(family) |> 
+  mutate(family = if_else(family == "Indo-European",
+                          "Indo-European",
+                          "other")) |> 
+  group_by(family) |> 
+  summarize(N = sum(n)) |> 
+  mutate(p = N / sum(N),
+         p = round(p, 2) * 100,
+         p = str_c(p, '%'))
+```
+
+Let's make plots of these, as it would be useful to show in the paper to get a quick glance of what's actually included in the main analysis for hierarchy consistency.
+
+```{r}
+# Core of plot:
+
+lang_p <- props %>% 
+  mutate(family = if_else(str_detect(family, 'Isolate'),
+                          'Isolate',
+                          family)) |> 
+  count(language, family, sort = TRUE) %>% 
+  ggplot(aes(x = reorder(language, n), y = n)) +
+  geom_col(aes(fill = family),
+           col = 'black')
+
+# Add annotations, axes, labels to plot:
+
+lang_p <- lang_p +
+  xlab(NULL) +
+  ylab('Number of datasets') +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(0, 10),
+                     breaks = seq(0, 10, 2)) +
+  scale_fill_viridis_d(name = NULL,
+                       option = 'turbo',
+                       direction = +1)
+
+# Cosmetic tweaking:
+
+lang_p <- lang_p +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.y = element_text(margin = margin(r = 10)),
+        legend.position = 'top')
+
+# Show plot in markdown and also save externally outside of R:
+
+lang_p
+ggsave(plot = lang_p,
+       filename = '../figures/pdf/number_of_tables_per_language.pdf',
+       width = 6.5, height = 4)
+ggsave(plot = lang_p,
+       filename = '../figures/png/number_of_tables_per_language.png',
+       width = 6.5, height = 4)
+```
+
+# Descriptive stats
+
+## Overall average and weighted mean
+
+What is the average hierarchy-consistency across tables?
+
+```{r}
+mean(props$proportion)
+```
+
+92% overall consistency, or 91.6% to be precise. But this is treating all equally. What if we weigh this average by the total number of tokens, so that the bigger tables contribute more? Let's create a `weight` column, for which we simply divide by the overall total, then use that column to compute a weighted average:
+
+```{r}
+# Compute weights:
+
+props <- mutate(props,
+                weight = total_tokens / sum(total_tokens))
+
+# Weighted mean:
+
+weighted.mean(x = props$proportion,   # data
+              w = props$weight)       # weights
+```
+
+Very similar. Suggests that for *this specific result*, it doesn't change much whether one weights based on study size.
+
+What are the biggest and smallest proportions?
+
+```{r}
+props |> 
+  select(source, proportion) |> 
+  arrange(desc(proportion)) |> 
+  print(n = Inf)
+```
+
+Is the proportion related to sample size? Quick-and-dirty (non-Bayesian) correlation test, using Spearman's rho as these are very different kind of variables.
+
+```{r}
+with(props,
+     cor.test(total_tokens, proportion, method = 'spearman'))
+```
+
+Interesting. Larger studies show more hierarchy consistency.
+
+Assess the correlation between years and tokens and years and proportion. First we need to get the dates out:
+
+```{r}
+props <- mutate(props,
+                year = str_extract(dataset, '[0-9]+'),
+                year = as.numeric(year))
+```
+
+Check correlations between years and tokens and years and proportion:
+
+```{r}
+with(props,
+     cor.test(year, proportion, method = 'spearman'))
+with(props,
+     cor.test(year, total_tokens, method = 'spearman'))
+```
+
+Studies that were published later do not show more hierarchy consistency, and neither has sample size consistently improved over time (which is a bit sad, actually).
+
+## Averaging by language
+
+Before getting into any random effects, it may be a good idea to see how the averages are when we average separately for each language, i.e., the 8 English data points collapsed into one, etc.
+
+```{r}
+lang_avgs <- props |> 
+  group_by(language) |> 
+  summarize(M = mean(proportion)) |> 
+  arrange(desc(M))
+
+# Show:
+
+lang_avgs
+```
+
+Look at spread:
+
+```{r}
+lang_avgs$M |> range() |> diff()
+```
+
+The biggest difference is 15%, which is non-negligible, but also not crazy variable across languages.
+
+## Differences for genre and type
+
+Let's assess whether the genre or type (corpus v dictionary) matters. We'll skip the weighted means for these separate results since from the previous analysis it's pretty clear that it doesn't matter much in this dataset and one can easily see that all the proportions are very similar.
+
+Let's look at `genre` first:
+
+```{r}
+props |> 
+  filter(!is.na(genre)) |> 
+  group_by(genre) |> 
+  summarize(M = mean(proportion))
+```
+
+Super duper similar. Let's look at the effect size of this using Cohen's d, only looking at general versus literary.
+
+```{r}
+props |> 
+  filter(!is.na(genre)) |> 
+  (\(df) cohen.d(proportion ~ genre, data = df))()
+```
+
+What about `type`?
+
+```{r}
+props |> 
+  group_by(type) |> 
+  summarize(M = mean(proportion))
+```
+
+Super similar as well. Check Cohen's d for that:
+
+```{r}
+props |> 
+  filter(!is.na(type)) |> 
+  (\(df) cohen.d(proportion ~ type, data = df))()
+```
+
+Even smaller.
+
+## Average without sound->sight and touch->sound?
+
+We'll compute the proportion without the reverse mapping sound->sight to see whether it's a good contributor to the hierarchy consistency, and then we do the same for touch to sound.
+
+```{r}
+props <- mutate(props,
+                prop_no_sound_sight = (hierarchy_tokens - sound_to_sight) / (total_tokens - sound_to_sight),
+                prop_no_touch_sound = (hierarchy_tokens - touch_to_sound) / (total_tokens - touch_to_sound),
+                prop_no_VS_no_TS = (hierarchy_tokens - touch_to_sound - sound_to_sight) / (total_tokens - touch_to_sound - sound_to_sight )) |> 
+  relocate(prop_no_sound_sight:prop_no_VS_no_TS, .after = proportion)
+```
+
+Check the averages for that:
+
+```{r}
+mean(props$prop_no_sound_sight)
+mean(props$prop_no_touch_sound)
+```
+
+What are the differences to the original mean (with each of these cells)?
+
+```{r}
+mean(props$proportion) - mean(props$prop_no_sound_sight)
+mean(props$proportion) - mean(props$prop_no_touch_sound)
+```
+
+The sound-to-sight cell makes up pretty much nothing. The sight-to-sound cell contributes about 4%.
+
+# Bayesian models
+
+## Setup for Bayesian analysis
+
+For the `genre` fixed effect, the `general language` level will be reference level because it comes before `literary` in the alphabet. For `type`, the `corpus` level will be reference level because it comes before `dictionary` in the alphabet. These reference levels make sense to me, so let's keep them this way.
+
+For `type`, we won't have to need to set the reference level as it will be on `corpus` already because that comes before `dictionary` in the alphabet. It makes sense to set up the data as a difference towards the corpus category as baseline, so we'll keep it this way.
+
+To set a weakly informative prior, we should consider what the chance level is first. There are 25 modality combinations (5 senses as rows * 5 senses as columns). This leaves us with 20 cells that are crossmodal (unimodal cases are not considered in the analysis). Of these, 11 cells count towards the hierarchy, rather than half, and that's because the hierarchy allows for mutual connections between sight and hearing. This means that chance is actually not at 10/20 = 50%, but at 11/20 = 55%. So we will set a weakly informative prior centered on 11/20.
+
+```{r}
+center <- log(0.55 / (1 - 0.55))     # logit value for center
+
+# Show center
+
+center
+```
+
+So, `0.2006707` is the center of our prior on the intercept. We'll fit a normally distributed prior focused on that neutral value, which builds in "mild skepticism" into our model, drawing values slightly lower to that value. Now we need to consider a range of standard deviations to think about what's plausible to assume. We don't want to bias the model too much, but we do want to make the analysis slightly more conservative.
+
+```{r}
+# if SD = 1, 1 * SD (assumption that 68% of all average proportions would fall in there)
+
+plogis(center - 1); plogis(center + 1)
+
+# if SD = 1, 2 * SD (assumption that 95% of all average proportions would fall in there):
+
+plogis(center - 2); plogis(center + 2)
+```
+
+This is quite a vague prior, but still more conservative than the corresponding frequentist model that would conceptually have a uniform prior on the intercept.
+
+```{r}
+int_only_priors <- c(prior(normal(0.2006707, 1), class = Intercept),
+                     prior(student_t(3, 0, 2.5), class = sd)) # scale = 3, mu = 0, sigma = 2.5
+```
+
+Then the priors for those models that also have additional fixed effects. Since the only variables we need to consider are categorical and binary (`genre` and `type`), we can follow Gelman et al.'s (2008) recommendation to use a Cauchy prior centered at zero with scale = 2.5.
+
+```{r}
+diff_mdl_priors <- c(prior(normal(0.2006707, 1), class = Intercept),
+                     prior(cauchy(0, 2.5), class = b),
+                     prior(student_t(3, 0, 2.5), class = sd))
+```
+
+## Fit main model corpus only
+
+Now we can now fit the model. We'll first fit the corpus only model because we then want to assess whether adding the `genre` predictor makes a difference. After that we'll expand the model to include the dictionary type as well to add the `type` predictor and see whether it's any worth.
+
+```{r eval = FALSE}
+prop_mdl <- brm(hierarchy_tokens | trials(total_tokens) ~ 
+                  
+                  # Fixed effects:
+                  
+                  1 + 
+                  
+                  # Random effects:
+                  
+                  (1|language),
+                
+                data = filter(props, type == 'corpus'),
+                family = binomial,
+                
+                # Priors:
+                
+                prior = int_only_priors,
+                
+                # MCMC settings:
+                
+                seed = 42,
+                cores = 4,
+                chains = 4,
+                iter = 6000,
+                warmup = 4000,
+                control = list(adapt_delta = 0.95),
+                save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(prop_mdl, file = '../models/proportion_model_corpus_only.RData')
+```
+
+Load the pre-compiled model:
+
+```{r}
+load('../models/proportion_model_corpus_only.RData')
+```
+
+Show the modeL:
+
+```{r}
+prop_mdl
+```
+
+Assess the hypothesis that the hierarchy consistency is above chance level of 55%, which is `0.2006707` in log odds:
+
+```{r}
+hypothesis(prop_mdl, 'Intercept > 0.2006707')
+```
+
+Yes. So, given this model, data, and priors, the probability of the overall hierarchy consistency being above 55% is 1.0.
+
+What's a good guess for a plausible range of hierarchy consistency percentages given this data and model?
+
+```{r}
+plogis(fixef(prop_mdl)[, 'Estimate']) # posterior mean
+plogis(fixef(prop_mdl)[, 'Q2.5']) 
+plogis(fixef(prop_mdl)[, 'Q97.5'])
+```
+
+Given this model, priors and data, we are 95% confident that the value lies in between about 89% and 95%, with a posterior mean of 93%.
+
+## Assess genre effect
+
+Assess the genre effect by adding the `genre` column as binary fixed effects predictor. There's no point in even attempting to fit random slopes here because genre and language are almost exactly confounded, as shown here:
+
+```{r}
+props |> 
+  filter(type == 'corpus') |> 
+  count(language, genre) |> 
+  pivot_wider(values_from = n, names_from = genre)
+```
+
+Notice that we have the contrast between `general language` and `literary` *only* for English and Italian, 2 of the 10 languages in this dataset. That means for 8(!!) the `genre` predictor is not within-language, hence no random slopes for this.
+
+```{r eval = FALSE}
+prop_genre_mdl <- brm(hierarchy_tokens | trials(total_tokens) ~ 
+                        # Fixed effects:
+                        
+                        1 + genre +
+                        
+                        # Random effects:
+                        
+                        (1|language),
+                
+                      data = filter(props, type == 'corpus'),
+                      family = binomial,
+                      
+                      # Priors:
+                      
+                      prior = diff_mdl_priors,
+                      
+                      # MCMC settings:
+                      
+                      seed = 42, cores = 4, chains = 4,
+                      iter = 6500, warmup = 4500,
+                      control = list(adapt_delta = 0.99,
+                                     max_treedepth = 13),
+                      save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(prop_genre_mdl, file = '../models/proportion_model_with_genre.RData')
+```
+
+Load the pre-compiled model:
+
+```{r}
+load('../models/proportion_model_with_genre.RData')
+```
+
+Let's do model comparison using LOO-CV (leave-one-out cross-validation):
+
+```{r eval = TRUE}
+# Individual LOO-CVs per model:
+
+prop_loo <- loo(prop_mdl, moment_match = TRUE, reloo = TRUE)
+prop_genre_loo <- loo(prop_genre_mdl, moment_match = TRUE, reloo = TRUE)
+
+# Save LOO-ICs for individual models:
+
+save(prop_loo, file = '../models/prop_loo.RData')
+save(prop_genre_loo, file = '../models/prop_genre_loo.RData')
+
+# Compare:
+
+prop_loo_compare <- loo_compare(prop_loo, prop_genre_loo)
+
+# Save:
+
+save(prop_loo_compare, file = '../models/prop_loo_compare.RData')
+```
+
+Load and show:
+
+```{r eval = TRUE}
+# Load:
+
+load('../models/prop_loo_compare.RData')
+load('../models/prop_loo.RData')
+load('../models/prop_genre_loo.RData')
+
+# Individual ICs:
+
+prop_loo
+prop_genre_loo
+
+# Show:
+
+prop_loo_compare
+```
+
+The `prop_mdl` without `genre` predictor is better in terms of cross-validation accuracy (how much it would generalize to unseen data), but only marginally so when compared to the correspondingly large standard error of the difference between the models, as shown by `prop_loo_compare`. The standard error is even larger than the difference between the two models, suggesting that there is no consistent difference between the two.
+
+## Assess type effect
+
+Next, let's assess whether the `type` effect is needed. So in this analysis, we look at the whole data, including both the dictionary and corpus data, and we will compare the two by adding the corresponding fixed effect `type`. However, we also need to refit the null model, which in this case is the intercept only model with the full dataset.
+
+```{r eval = FALSE}
+full_mdl <- brm(hierarchy_tokens | trials(total_tokens) ~ 
+                  
+                  # Fixed effects:
+                  
+                  1 +
+                  
+                  # Random effects:
+                  
+                  (1|language),
+                
+                data = props,
+                family = binomial,
+                
+                # Priors:
+                
+                prior = int_only_priors,
+                
+                # MCMC settings:
+                
+                seed = 42, cores = 4, chains = 4,
+                iter = 6500, warmup = 4500,
+                control = list(adapt_delta = 0.99,
+                               max_treedepth = 13),
+                save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(full_mdl, file = '../models/full_mdl.RData')
+```
+
+Next, let's add the `type` predictor:
+
+```{r eval = FALSE}
+full_type_mdl <- brm(hierarchy_tokens | trials(total_tokens) ~ 
+                       
+                       # Fixed effects:
+                       
+                       1 + type +
+                       
+                       # Random effects:
+                       
+                       (1|language),
+                
+                     data = props,
+                     family = binomial,
+                     
+                     # Priors:
+                     
+                     prior = diff_mdl_priors,
+                     
+                     # MCMC settings:
+                     
+                     seed = 42, cores = 4, chains = 4,
+                     iter = 6500, warmup = 4500,
+                     control = list(adapt_delta = 0.99,
+                                    max_treedepth = 13),
+                     save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(full_type_mdl, file = '../models/full_type_mdl.RData')
+```
+
+Load the models:
+
+```{r}
+load('../models/full_mdl.RData')
+load('../models/full_type_mdl.RData')
+```
+
+Let's do model comparison using LOO-CV (leave-one-out cross-validation):
+
+```{r eval = TRUE}
+# Individual LOO-ICs per model:
+
+full_loo <- loo(full_mdl, moment_match = TRUE, reloo = TRUE)
+full_type_loo <- loo(full_type_mdl, moment_match = TRUE, reloo = TRUE)
+
+# Save LOO-ICs for individual models:
+
+save(full_loo, file = '../models/full_loo.RData')
+save(full_type_loo, file = '../models/full_type_loo.RData')
+
+# Compare:
+
+full_loo_compare <- loo_compare(full_loo, full_type_loo)
+
+# Save:
+
+save(full_loo_compare, file = '../models/full_loo_compare.RData')
+```
+
+Load and show:
+
+```{r eval = TRUE}
+# Load:
+
+load('../models/full_loo_compare.RData')
+load('../models/full_loo.RData')
+load('../models/full_type_loo.RData')
+
+# Show ICs:
+
+full_loo
+full_type_loo
+
+# Show:
+
+full_loo_compare
+```
+
+The model without the `type` predictor does better, but not by a lot as indicated by the large standard error from the LOO-CV comparison. So we'll just work with `full_mdl` as our best model. We wouldn't *really* have to exclude *genre* and *type*, but since it doesn't increase model performance *and* the model is much easier to interpret as just an intercept only model of the hierarchy consistency mean... we'll use that.
+
+## Full model interpretation
+
+Report model:
+
+```{r}
+full_mdl
+```
+
+Check the fixed effects:
+
+```{r}
+plogis(fixef(full_mdl)[-2]) 
+```
+
+Assess hypothesis:
+
+```{r}
+hypothesis(full_mdl, 'Intercept > 0.2006707')
+```
+
+## Plot of random effects (languages)
+
+Let's look at the posterior predictions for different languages, always for out of a 1000 so we get the decimals:
+
+```{r}
+lang_avgs <- predict(full_mdl, bind_cols(lang_avgs, total_tokens = 1000)) |> 
+  bind_cols(lang_avgs) |> 
+  relocate(language) |> 
+  select(-Est.Error)
+
+# Show:
+
+lang_avgs
+```
+
+Divide by 1000 to get estimates on a proportion scale:
+
+```{r}
+lang_avgs <- lang_avgs |> 
+  mutate(Estimate = Estimate / 1000,
+         Q2.5 = Q2.5 / 1000,
+         Q97.5 = Q97.5 / 1000)
+```
+
+Make a plot of this:
+
+```{r}
+# Plot core:
+
+lang_p <- lang_avgs |> 
+  ggplot(mapping = aes(x = reorder(language, Estimate))) +
+  geom_point(aes(y = Estimate),
+             pch = 15, size = 3) +
+  geom_segment(aes(xend = reorder(language, Estimate),
+                   y = Q2.5,
+                   yend = Q97.5)) +
+  geom_point(aes(y = M),
+             pch = 23, size = 2.5,
+             fill = 'yellow', col = 'black') +
+  geom_hline(yintercept = 0.55, linetype = 'dashed')
+
+# Axes, annotations, and labels:
+
+lang_p <- lang_p +
+  coord_cartesian(clip = 'off') +
+  annotate('text', x = 9.3,
+           hjust = 0,
+           y = 0.55 + 0.02,
+           label = 'Chance level: 11 / 20 = 55%') +
+  scale_y_continuous(limits = c(0.5, 1)) +
+  xlab(NULL) +
+  ylab('Proportion of hierarchy consistent cases')
+
+# Cosmetics:
+
+lang_p <- lang_p +
+  theme_classic() +
+  theme(axis.text.x = element_text(face = 'bold',
+                                   angle = 45, hjust = 1),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+# Show and save:
+
+lang_p
+ggsave(plot = lang_p,
+       filename = '../figures/pdf/individual_languages_ranefs.pdf',
+       width = 6.5, height = 4.5)
+ggsave(plot = lang_p,
+       filename = '../figures/png/individual_languages_ranefs.png',
+       width = 6.5, height = 4.5)
+```
+
+## Reduced models without cells of interest
+
+Next, we'll build the reduced models, but for this we first need to compute the full hierarchy tokens *without* the sound->sight cell, then without the touch->sound cell, and then without both of these cells.
+
+If we take the adjusted hierarchy congruent tokens (e.g., no the touch->sound), we need to be careful that the total token count is also adjusted to exclude these values. Otherwise we will unfairly bias against the hierarchy as we are simply transferring the tokens over to the other side, i.e., the non-congruent cases would include touch->sound and sound->sight etc.
+
+```{r}
+props <- mutate(props,
+                no_sight_sound = hierarchy_tokens - sight_to_sound,
+                no_touch_sound = hierarchy_tokens - touch_to_sound,
+                no_SS_and_TS = hierarchy_tokens - sight_to_sound - touch_to_sound,
+                no_sight_sound_total = total_tokens - sight_to_sound,
+                no_touch_sound_total = total_tokens - touch_to_sound,
+                no_SS_and_TS_total = total_tokens - sight_to_sound - touch_to_sound)
+```
+
+For reporting, check descriptive averages and differences to original results:
+
+```{r}
+# Save mean:
+
+original_mean <- mean(props$proportion)
+
+# Compute the respective proportions:
+
+props <- mutate(props,
+                no_sight_sound_p = no_sight_sound / no_sight_sound_total,
+                no_touch_sound_p = no_touch_sound / no_touch_sound_total,
+                no_SS_and_TS_p = no_SS_and_TS / no_SS_and_TS_total)
+
+# Check averages:
+
+mean(props$no_sight_sound_p)
+mean(props$no_touch_sound_p)
+mean(props$no_SS_and_TS_p)
+
+# Check differences:
+
+original_mean - mean(props$no_sight_sound_p) # 1.7%
+original_mean - mean(props$no_touch_sound_p) # 3.8%
+original_mean - mean(props$no_SS_and_TS_p) # 6.9%
+```
+
+What are the adjusted chance levels for dropping one cell and two cells?
+
+```{r}
+10 / 19 # dropping one cell
+9 / 18 # dropping two cells
+```
+
+Let's build analogous model for the two "reduced" hierarchies to assess the impact of touch->sound and sight->sound:
+
+```{r eval = FALSE}
+# Model excluding touch->sound:
+
+prop_no_TS_mdl <- brm(no_touch_sound | trials(no_touch_sound_total) ~ 
+                        
+                        # Fixed effects:
+                  
+                        1 + 
+                  
+                        # Random effects:
+                  
+                        (1|language),
+                
+                      data = props,
+                      family = binomial,
+                
+                      # Priors:
+                
+                      prior = int_only_priors,
+                
+                      # MCMC settings:
+                
+                      seed = 42,
+                      cores = 4,
+                      chains = 4,
+                      iter = 6000,
+                      warmup = 4000,
+                      control = list(adapt_delta = 0.95),
+                      save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(prop_no_TS_mdl, file = '../models/prop_no_TS_mdl.RData')
+
+# Model excluding sight->sound:
+
+prop_no_VS_mdl <- brm(no_sight_sound | trials(no_sight_sound_total) ~ 
+                        
+                        # Fixed effects:
+                  
+                        1 + 
+                  
+                        # Random effects:
+                  
+                        (1|language),
+                
+                      data = props,
+                      family = binomial,
+                
+                      # Priors:
+                
+                      prior = int_only_priors,
+                
+                      # MCMC settings:
+                
+                      seed = 42,
+                      cores = 4,
+                      chains = 4,
+                      iter = 6000,
+                      warmup = 4000,
+                      control = list(adapt_delta = 0.95),
+                      save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(prop_no_VS_mdl, file = '../models/prop_no_VS_mdl.RData')
+
+# Model excluding both:
+
+prop_no_VS_no_TS_mdl <- brm(no_SS_and_TS | trials(no_SS_and_TS_total) ~ 
+                              
+                              # Fixed effects:
+                              
+                              1 + 
+                              
+                              # Random effects:
+                              
+                              (1|language),
+                            
+                            data = props,
+                            family = binomial,
+                
+                            # Priors:
+                
+                            prior = int_only_priors,
+                
+                            # MCMC settings:
+                
+                            seed = 42, cores = 4, chains = 4,
+                            iter = 6000, warmup = 4000,
+                            control = list(adapt_delta = 0.95),
+                            save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(prop_no_VS_no_TS_mdl, file = '../models/prop_no_VS_no_TS_mdl.RData')
+```
+
+Load in markdown:
+
+```{r}
+load('../models/prop_no_VS_no_TS_mdl.RData')
+load('../models/prop_no_VS_mdl.RData')
+load('../models/prop_no_TS_mdl.RData')
+```
+
+Check all three models:
+
+```{r}
+prop_no_VS_mdl
+prop_no_TS_mdl
+prop_no_VS_no_TS_mdl
+```
+
+Assess the hypothesis that the hierarchy consistency is above chance level, which minus the touch->sound cell or minus the touch->sound cell is 10/20, so log odd intercept of 0. For the model that are missing *both* cells, chance is at 9/20, and so we need to use the following log odd comparison value:
+
+```{r}
+# Proportions:
+
+one_p <- 10 / 19 # dropping one cell
+two_p <- 9 / 18 # dropping two cells
+
+# Log odds:
+
+log(one_p / (1 - one_p)) # logit for one cell
+log(two_p / (1 - two_p)) # logit for two cells
+```
+
+Check them:
+
+```{r}
+hypothesis(prop_no_TS_mdl, 'Intercept > 0.1053605')
+hypothesis(prop_no_VS_mdl, 'Intercept > 0.1053605')
+hypothesis(prop_no_VS_no_TS_mdl, 'Intercept > 0')
+```
+
+Check results in more interpretable metric:
+
+```{r}
+plogis(fixef(prop_no_VS_no_TS_mdl)[-2])
+```
+
+# Density plot of proportions and superimposed model
+
+Make a plot of this, which we'll save in an object called `prop_p`. We'll add the 95% credible interval of the model's estimate for the proportion of hierarchy-consistent cases into the plot as well. This way people can see the raw data and the model.
+
+```{r}
+# Set colors for second category:
+
+# second_category <- '#BF5700'
+second_category <- '#12674A'
+
+# Core of plot:
+
+prop_p <- props %>% 
+  ggplot(aes(x = proportion)) +
+  geom_vline(xintercept = 0.55, linetype = 'dashed',
+             col = 'purple') +
+  geom_vline(xintercept = 9 / 20, linetype = 'dashed',
+             col = second_category) +
+  geom_density(fill = 'purple', alpha = 0.8) +
+  geom_density(mapping = aes(x = prop_no_VS_no_TS),
+               fill = second_category, alpha = 0.8)
+  NULL
+
+# Annotations:
+
+prop_p <- prop_p +
+  annotate('segment',
+           x = plogis(fixef(full_mdl)[, 'Q2.5']),
+           xend = plogis(fixef(full_mdl)[, 'Q97.5']),
+           y = 0.45, yend = 0.45,
+           arrow = arrow(ends = 'both', angle = 90, length = unit(.2, 'cm'))) +
+  annotate('point',
+           x = plogis(fixef(full_mdl)[, 'Estimate']),
+           y = 0.45, pch = 15, size = 3) +
+  annotate('segment',
+           x = plogis(fixef(prop_no_VS_no_TS_mdl)[, 'Q2.5']),
+           xend = plogis(fixef(prop_no_VS_no_TS_mdl)[, 'Q97.5']),
+           y = 0.45, yend = 0.45,
+           arrow = arrow(ends = 'both', angle = 90, length = unit(.2, 'cm'))) +
+  annotate('point',
+           x = plogis(fixef(prop_no_VS_no_TS_mdl)[, 'Estimate']),
+           y = 0.45, pch = 15, size = 3)
+  NULL
+  
+
+# Add annotations, axes, labels to plot:
+
+prop_p <- prop_p +
+  annotate('text',
+           x = 0.559,
+           y = 9,
+           label = 'Chance level:\n55% = 11/20 cells',
+           hjust = 0,
+           col = 'purple') +
+  annotate('text',
+           x = 0.441,
+           y = 9,
+           label = 'Updated chance level:\n45% = 9/20 cells',
+           hjust = 1,
+           col = second_category) +
+  annotate('label',
+           x = 0.59,
+           y = 2.1,
+           fill = 'darkseagreen4',
+           label = 'Without:\ntouch->sound\nsight->sound',
+           hjust = 0) +
+  xlab('Proportion of hierarchy-consistent cases') +
+  ylab('Density') +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(0, 10)) +
+  scale_x_continuous(limits = c(0.2, 1),
+                     breaks = seq(0.2, 1, 0.1))
+
+# Cosmetic tweaking:
+  
+prop_p <- prop_p +
+  theme_classic() +
+  theme(axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.x = element_text(margin = margin(t = 12)),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+# Show plot in markdown and also save externally outside of R:
+
+prop_p
+ggsave(plot = prop_p,
+       filename = '../figures/pdf/average_proportion.pdf',
+       width = 6.5, height = 4)
+ggsave(plot = prop_p,
+       filename = '../figures/png/average_proportion.png',
+       width = 6.5, height = 4)
+```
+
+# Plots for genre and type
+
+## Boxplot genre
+
+Let's make a boxplot of the two genres against each other:
+
+```{r}
+# Core of plot:
+
+genre_p <- props |> 
+  filter(!is.na(genre)) |> 
+  mutate(genre = if_else(genre == 'general language', 'general', 'literary')) %>% 
+  ggplot(aes(x = genre, fill = genre, y = proportion)) +
+  geom_boxplot(width = 0.59)
+
+# Add annotations, axes, labels to plot:
+
+genre_p <- genre_p +
+  xlab(NULL) +
+  ylab('Proportion of hierarchy-consistent cases') +
+  scale_y_continuous(limits = c(0.8, 1.0),
+                     breaks = seq(0.8, 1.0, 0.05)) +
+  scale_fill_manual(values = c('#A7C2CC', '#D7BA89'))
+  
+# Cosmetic tweaking:
+
+genre_p <- genre_p +
+  theme_classic() +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(face = 'bold', size = 12),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+# Show plot in markdown and also save externally outside of R:
+
+genre_p
+ggsave(plot = genre_p,
+       filename = '../figures/pdf/genre_effect.pdf',
+       width = 3.5, height = 5.5)
+ggsave(plot = genre_p,
+       filename = '../figures/png/genre_effect.png',
+       width = 3.5, height = 5.5)
+```
+
+## Boxplot type
+
+Do the same for type:
+
+```{r}
+# Core of plot:
+
+type_p <- props %>% 
+  ggplot(aes(x = type, fill = type, y = proportion)) +
+  geom_boxplot(width = 0.59)
+
+# Add annotations, axes, labels to plot:
+
+type_p <- type_p +
+  xlab(NULL) +
+  ylab('Proportion of hierarchy-consistent cases') +
+  scale_y_continuous(limits = c(0.8, 1.0),
+                     breaks = seq(0.8, 1.0, 0.05)) +
+  scale_fill_manual(values = c('#D7BA89', '#A7C2CC'))
+  
+# Cosmetic tweaking:
+
+type_p <- type_p +
+  theme_classic() +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(face = 'bold', size = 12),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+# Show plot in markdown and also save externally outside of R:
+
+type_p
+ggsave(plot = type_p,
+       filename = '../figures/pdf/type_effect.pdf',
+       width = 3.5, height = 5.5)
+ggsave(plot = type_p,
+       filename = '../figures/png/type_effect.png',
+       width = 3.5, height = 5.5)
+```
+
+## Double plot
+
+Let's use the `patchwork` package to put together into a double plot:
+
+```{r}
+# Add titles:
+
+genre_p <- genre_p + ggtitle('a) Genre effect') +
+  theme(plot.title = element_text(face= 'bold'),
+        axis.text.x = element_text(size = 10))
+type_p <- type_p + ggtitle('b) Type effect') +
+  theme(plot.title = element_text(face= 'bold'),
+        axis.text.x = element_text(size = 10))
+
+# Switch off y-axes for what is going to be second plot:
+
+type_p <- type_p + ylab(NULL)
+
+# Put together:
+
+both_p <- genre_p + plot_spacer() + type_p + plot_layout(widths = c(1.9, 0.2, 1.9))
+
+# Show and save:
+
+both_p
+ggsave(both_p, filename = '../figures/pdf/genre_type_double_plot.pdf',
+       width = 4.5, height = 4)
+ggsave(both_p, filename = '../figures/png/genre_type_double_plot.png',
+       width = 4.5, height = 4)
+```
+
+# Contribution of individual cells to average
+
+For the individual cells, compute the contribution to the average:
+
+```{r}
+props <- props |> 
+  mutate(touch_to_taste_p = touch_to_taste / hierarchy_tokens,
+         touch_to_smell_p = touch_to_smell / hierarchy_tokens,
+         touch_to_sound_p = touch_to_sound / hierarchy_tokens,
+         touch_to_sight_p = touch_to_sight / hierarchy_tokens,
+         taste_to_smell_p = taste_to_smell / hierarchy_tokens,
+         taste_to_sound_p = taste_to_sound / hierarchy_tokens,
+         taste_to_sight_p = taste_to_sight / hierarchy_tokens,
+         smell_to_sound_p = smell_to_sound / hierarchy_tokens,
+         smell_to_sight_p = smell_to_sight / hierarchy_tokens,
+         sound_to_sight_p = sound_to_sight / hierarchy_tokens,
+         sight_to_sound_p = sight_to_sound / hierarchy_tokens)
+```
+
+Sanity check that they add up to one:
+
+```{r}
+select(props, touch_to_taste_p:sight_to_sound_p) |> rowSums()
+```
+
+Yes, correct!
+
+Make it into a long format table:
+
+```{r}
+contributions_df <- props |> 
+  select(dataset, touch_to_taste_p:sight_to_sound_p) |> 
+  pivot_longer(touch_to_taste_p:sight_to_sound_p,
+               values_to = 'proportion',
+               names_to = 'mapping') |> 
+  mutate(mapping = str_replace(mapping, '_p$', ''),
+         mapping = str_replace_all(mapping, '_', '-'))
+```
+
+Make a plot of this:
+
+```{r}
+# Plot core:
+
+contributions_p <- contributions_df |> 
+  ggplot(aes(x = reorder(mapping, proportion),
+             y = proportion,
+             fill = reorder(mapping, proportion, decreasing = TRUE))) +
+  geom_boxplot(width = 0.6) +
+  geom_hline(yintercept = 0, linetype = 'dashed')
+
+# Axes and labels:
+
+contributions_p <- contributions_p +
+  scale_y_continuous(limits = c(0, 0.8),
+                     breaks = seq(0, 0.8, 0.2)) +
+  scale_fill_brewer(palette = 'Spectral',
+                    guide = 'none') +
+  xlab(NULL) +
+  ylab('Proportion of\nhierarchy-congruent synesthesias')
+
+# Cosmetics:
+
+contributions_p <- contributions_p +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.x = element_text(margin = margin(t = 12)),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+# Show and save:
+
+contributions_p
+ggsave('../figures/pdf/contributions_plot.pdf', contributions_p,
+       width = 8, height = 5)
+ggsave('../figures/png/contributions_plot.png', contributions_p,
+       width = 8, height = 5)
+```
+
+Check how much the three majority cases make up of the % hierarchy consistent cases:
+
+```{r}
+props <- props |> 
+  mutate(majority_p = touch_to_sound_p + touch_to_sight_p + sight_to_sound_p)
+
+# Show and arrange by that:
+
+props |> 
+  select(dataset, majority_p) |> 
+  arrange(desc(majority_p)) |> 
+  print(n = Inf)
+
+# Mean and median:
+
+mean(props$majority_p)
+median(props$majority_p)
+```
+
+# Unidirectionality versus asymmetry
+
+Loop through all datasets and get zeros:
+
+```{r}
+# Initialize empty column:
+
+props <- mutate(props, zeros = NA)
+
+# For loop:
+
+for (i in 1:nrow(props)) {
+  props[i, ]$zeros <- sum(both_tables[[props[i, ]$dataset]] == 0, na.rm = TRUE)
+}
+```
+
+Is the number of zeros correlated to sample size?
+
+```{r}
+props |> 
+  ggplot(aes(x = log(total_tokens), y = log(zeros))) +
+  geom_smooth(method = 'lm') +
+  geom_point() +
+  theme_classic()
+```
+
+Do a Spearman's correlation of this:
+
+```{r}
+with(props, cor.test(total_tokens, zeros, method = 'spearman'))
+```
+
+Let's check the two languages for which we have the most data points:
+
+```{r}
+props |> 
+  count(language, sort = TRUE)
+```
+
+Let's look at English and Hungarian.
+
+```{r}
+english_datasets <- props |> 
+  filter(language == 'English') |> 
+  pull(dataset)
+
+hungarian_datasets <- props |> 
+  filter(language == 'English') |> 
+  pull(dataset)
+```
+
+Get those tables:
+
+```{r}
+english_tables <- both_tables[english_datasets]
+
+hungarian_tables <- both_tables[hungarian_datasets]
+```
+
+Get rid of Winter (2019) from `english_tables` — reasons explained in the paper.
+
+```{r}
+english_tables <- english_tables[names(english_tables) != 'winter_2019_tokens']
+```
+
+Add all the tables on top of each other for English:
+
+```{r}
+empty_tab <- matrix(c(NA, 0, 0, 0, 0,
+                      0, NA, 0, 0, 0,
+                      0, 0, NA, 0, 0,
+                      0, 0, 0, NA, 0,
+                      0, 0, 0, 0, NA),
+                    byrow = TRUE, nrow = 5)
+
+# Loop:
+
+for (i in 1:length(english_tables)) {
+  empty_tab <- empty_tab + english_tables[[i]]
+}
+
+# Show:
+
+empty_tab
+```
+
+Not a single reverse mapping anymore! Whereas previously we would have been able to claim reverse mappings for:
+
+```{r}
+props |> 
+  filter(language == 'English') |> 
+  summarize(M = mean(zeros))
+```
+
+... on average five claims of unidirectionality if we were following the logic that that's the zeros.
+
+What about Hungarian?
+
+```{r}
+empty_tab <- matrix(c(NA, 0, 0, 0, 0,
+                      0, NA, 0, 0, 0,
+                      0, 0, NA, 0, 0,
+                      0, 0, 0, NA, 0,
+                      0, 0, 0, 0, NA),
+                    byrow = TRUE, nrow = 5)
+
+# Loop:
+
+for (i in 1:length(hungarian_tables)) {
+  empty_tab <- empty_tab + hungarian_tables[[i]]
+}
+
+# Show:
+
+empty_tab
+```
+8
+Not a single reverse mapping anymore! Whereas previously we would have been able to claim reverse mappings for:
+
+```{r}
+props |> 
+  filter(language == 'Hungarian') |> 
+  summarize(M = mean(zeros))
+```
+
+Previously we would have been able to claim 4.29 mappings per table on average.
+
+This completes this analysis.
+

@@ -1,0 +1,1927 @@
+---
+title: "Meta-analysis of synesthetic metaphor tables"
+author: "Bodo"
+date: "2023-07-10"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This script looks at percent hierarchy consistency. Since this is our first analysis, we'll also spend some time checking datasets to report overall statistics in the paper.
+
+Load tables:
+
+```{r}
+# List of all tables:
+
+load('../additional_data/all_included_tables_list.RData')
+```
+
+# Important note
+
+<!-- This analysis includes an analysis of standardized residuals for transparency that has since then been discarded. We found that the standardized residuals were hard to interpret as they confounded asymmetry with target preference. Theoretical conclusions would not change given the whole set of Analysis (1-3). -->
+
+# Simple check, overall proportion
+
+Add *all* tables on top of each other:
+
+```{r}
+empty_tab <- matrix(c(NA, 0, 0, 0, 0,
+                      0, NA, 0, 0, 0,
+                      0, 0, NA, 0, 0,
+                      0, 0, 0, NA, 0,
+                      0, 0, 0, 0, NA),
+                    byrow = TRUE, nrow = 5)
+
+# Loop:
+
+for (i in 1:length(both_tables)) {
+  empty_tab <- empty_tab + both_tables[[i]]
+}
+
+# Show:
+
+empty_tab
+```
+
+Check the overall proportion of each cell:
+
+```{r}
+round(empty_tab / sum(empty_tab, na.rm = TRUE), 3)
+```
+
+# Setup
+
+```{r warning = FALSE, message = FALSE}
+library(tidyverse)     # for data processing and visualization
+library(brms)          # for fitting bayesian models
+library(tidybayes)     # for spread_draws()
+library(patchwork)     # for multi plot arrays
+library(png)     # for loading png files
+library(grid)# for rasterGrob()
+```
+
+Check package version for the new package:
+
+```{r}
+packageVersion('png')
+```
+
+Load the `both_tables` list that has been created in the `table_preprocessing.Rmd` file.
+
+```{r warning = FALSE, message = FALSE}
+# List of all tables:
+
+load('../additional_data/all_included_tables_list.RData')
+```
+
+Show 5 random rows each to get an overview:
+
+```{r}
+# List of all tables:
+
+both_tables[sample(1:length(both_tables), 5)]
+```
+
+Load metadata and rename columns as desired:
+
+```{r warning = FALSE, message = FALSE}
+metadata <- read_csv('../metadata.csv') %>% 
+  rename(genre = Genre,
+         language = `Language of data`,
+         source = `Type of data source`,
+         table_title = `Table title`)
+```
+
+# Demonstrate the approach
+
+In the methods section, we'll explain the concept of standardized residuals using Winter's (2019) table:
+
+```{r}
+winter_2019 <- both_tables$winter_2019_tokens
+
+winter_2019
+```
+
+Take the first row, cells `2:5`, as we don't need the `NA` case in here:
+
+```{r}
+winter_2019 <- winter_2019[1, 2:5]
+
+winter_2019
+```
+
+Show the obseved and expected values for comparison, as well as the unstandardized and standardized residuals:
+
+```{r}
+chisq.test(winter_2019)$observed
+chisq.test(winter_2019)$expected
+chisq.test(winter_2019)$residuals
+chisq.test(winter_2019)$stdres
+```
+
+# Compute all standardized residuals
+
+This was just a demo for one row — we need to repeat this for a) all five modalities, and b) for each dataset. This is achieved by the next loop:
+
+```{r warning = FALSE, message = FALSE}
+# Setup empty list for saving:
+
+stdres <- list()
+
+# Loop through and get all standardized residuals:
+
+for (i in seq_along(both_tables)) {
+  # Check if there is heat/touch, checking for column suffices here:
+  
+  M <- both_tables[[i]]
+  
+  # Create empty table to be filled:
+  
+  M_stdres <- c()
+  
+  # Loop through five rows
+  
+  for (j in 1:5) {
+    
+    # extract row and compute standardized residuals
+    
+    this_row <- M[j, ]
+    
+    if (sum(this_row, na.rm = TRUE) != 0) { # if row is not entirely zero
+      
+      this_stdres <- chisq.test(this_row[-j])$stdres
+      
+      # append NAs to the spot where the diagonal would be, so that we can reappend it to a matrix
+    
+      if (j == 1) { this_stdres <- c(NA, this_stdres); names(this_stdres)[1] <- 'touch'}
+      if (j == 2) { this_stdres <- c(this_stdres[1], NA, this_stdres[2:4]) }
+      if (j == 3) { this_stdres <- c(this_stdres[1:2], NA, this_stdres[3:4]) }
+      if (j == 4) { this_stdres <- c(this_stdres[1:3], NA, this_stdres[4]) }
+      if (j == 5) { this_stdres <- c(this_stdres, NA) }
+      
+    } else {  # if row is entirely zero, set to NA 
+      this_stdres <- rep(NA, 5)
+    }
+    
+    # Put into table:
+    
+    M_stdres <- rbind(M_stdres, this_stdres)
+    }
+  
+    # Set diagonal to NA:
+  
+    diag(M_stdres) <- NA
+    
+    # Add row names:
+    
+    row.names(M_stdres) <- c('touch', 'taste', 'smell', 'hearing', 'sight')
+  
+    # Chi-Square test and extracting residuals:
+  
+    stdres[[i]] <- M_stdres
+}
+```
+
+Show:
+
+```{r}
+stdres[1:5]
+```
+
+We'll take this to grow a data frame (shame on me) to have everything in a format that we can use ggplot and statistical models with.
+
+```{r}
+# Initialize empty object to be grown:
+
+stdres_df <- c()
+
+# Loop through and get all standardized residuals:
+
+for (i in seq_along(stdres)) {
+  
+  # Get table of standardized residuals:
+  
+  M <- stdres[[i]]
+  
+  # Unpack and make into long format:
+  
+  this_df <- M %>% 
+    as.data.frame() %>% 
+    rownames_to_column(var = 'source') %>% 
+    pivot_longer(cols = touch:sight,
+                 values_to = 'stdres',
+                 names_to = 'target')
+  
+  # Append the namne of the table:
+  
+  this_df$table_title <- names(both_tables)[i]
+  
+  # Append this temporary data frame to the results data frame:
+  
+  stdres_df <- rbind(stdres_df, this_df)
+}
+```
+
+Check:
+
+```{r}
+stdres_df
+```
+
+# Bayesian models for this
+
+For simplicity, we'll fit five Bayesian models — otherwise we'll have to deal with *lots* of interactions and arithmetic to recompute all cells. This way we don't use information from across rows, thus treating each source as standalone.
+
+But first we'll need to merge the language metadata back in here so we can have a random effect for language:
+
+```{r}
+stdres_df <- left_join(stdres_df,
+                       select(metadata, table_title, language))
+```
+
+Priors: the most theoretically important bit here is `prior(normal(0, 5), class = b/Intercept)`, which is a fairly conservative weakly informative prior given the high standardized residuals we can expect to observe (e.g., given Winter 2019's data) biasing the estimates of each condition difference closer to 0.
+
+```{r}
+my_priors <- c(prior(normal(0, 5), class = Intercept),
+               prior(normal(0, 5), class = b),
+               prior(student_t(3, 0, 2.5), class = sd), # df = 3, mu = 0, sigma = 2.5
+               prior(lkj(2), class = cor))
+```
+
+Fit the touch model:
+
+```{r eval = FALSE}
+touch_stdres_mdl <- brm(stdres ~ 
+                          
+                          # Fixed effects:
+                          
+                          1 + target +
+                          
+                          # Random effects:
+                          
+                          (1 + target|language),
+                        
+                        data = filter(stdres_df,
+                                      source == 'touch',
+                                      !is.na(stdres)),
+                        family = gaussian,
+                
+                        # Priors:
+                        
+                        prior = my_priors,
+                        
+                        # MCMC settings:
+                        
+                        seed = 42, cores = 4, chains = 4,
+                        iter = 8000, warmup = 5500,
+                        control = list(adapt_delta = 0.99),
+                        save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(touch_stdres_mdl, file = '../models/touch_stdres_mdl.RData')
+```
+
+Fit the taste model:
+
+```{r eval = FALSE}
+taste_stdres_mdl <- brm(stdres ~ 
+                          
+                          # Fixed effects:
+                          
+                          1 + target +
+                          
+                          # Random effects:
+                          
+                          (1 + target|language),
+                        
+                        data = filter(stdres_df,
+                                      source == 'taste',
+                                      !is.na(stdres)),
+                        family = gaussian,
+                
+                        # Priors:
+                        
+                        prior = my_priors,
+                        
+                        # MCMC settings:
+                        
+                        seed = 42, cores = 4, chains = 4,
+                        iter = 8000, warmup = 5500,
+                        control = list(adapt_delta = 0.99),
+                        save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(taste_stdres_mdl, file = '../models/taste_stdres_mdl.RData')
+```
+
+Fit the smell model:
+
+```{r eval = FALSE}
+smell_stdres_mdl <- brm(stdres ~ 
+                          
+                          # Fixed effects:
+                          
+                          1 + target +
+                          
+                          # Random effects:
+                          
+                          (1 + target|language),
+                        
+                        data = filter(stdres_df,
+                                      source == 'smell',
+                                      !is.na(stdres)),
+                        family = gaussian,
+                
+                        # Priors:
+                        
+                        prior = my_priors,
+                        
+                        # MCMC settings:
+                        
+                        seed = 42, cores = 4, chains = 4,
+                        iter = 8000, warmup = 5500,
+                        control = list(adapt_delta = 0.99),
+                        save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(smell_stdres_mdl, file = '../models/smell_stdres_mdl.RData')
+```
+
+Fit the sight model:
+
+```{r eval = FALSE}
+sight_stdres_mdl <- brm(stdres ~ 
+                          
+                          # Fixed effects:
+                          
+                          1 + target +
+                          
+                          # Random effects:
+                          
+                          (1 + target|language),
+                        
+                        data = filter(stdres_df,
+                                      source == 'sight',
+                                      !is.na(stdres)),
+                        family = gaussian,
+                
+                        # Priors:
+                        
+                        prior = my_priors,
+                        
+                        # MCMC settings:
+                        
+                        seed = 42, cores = 4, chains = 4,
+                        iter = 8000, warmup = 5500,
+                        control = list(adapt_delta = 0.99),
+                        save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(sight_stdres_mdl, file = '../models/sight_stdres_mdl.RData')
+```
+
+Fit the sound model:
+
+```{r eval = FALSE}
+sound_stdres_mdl <- brm(stdres ~ 
+                          
+                          # Fixed effects:
+                          
+                          1 + target +
+                          
+                          # Random effects:
+                          
+                          (1 + target|language),
+                        
+                        data = filter(stdres_df,
+                                      source == 'hearing',
+                                      !is.na(stdres)),
+                        family = gaussian,
+                
+                        # Priors:
+                        
+                        prior = my_priors,
+                        
+                        # MCMC settings:
+                        
+                        seed = 42, cores = 4, chains = 4,
+                        iter = 8000, warmup = 5500,
+                        control = list(adapt_delta = 0.99),
+                        save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(sound_stdres_mdl, file = '../models/sound_stdres_mdl.RData')
+```
+
+Load the models in the script:
+
+```{r}
+load('../models/touch_stdres_mdl.RData')
+load('../models/taste_stdres_mdl.RData')
+load('../models/smell_stdres_mdl.RData')
+load('../models/sight_stdres_mdl.RData')
+load('../models/sound_stdres_mdl.RData')
+```
+
+Show model results:
+
+```{r}
+touch_stdres_mdl
+taste_stdres_mdl
+smell_stdres_mdl
+sight_stdres_mdl
+sound_stdres_mdl
+```
+
+
+# Visualize posterior
+
+Get all posterior samples:
+
+```{r}
+touch_posts <- touch_stdres_mdl |> 
+  spread_draws(b_Intercept, b_targettaste, b_targetsmell, b_targetsight) |> 
+  select(-(.chain:.draw))
+
+taste_posts <- taste_stdres_mdl |> 
+  spread_draws(b_Intercept, b_targettouch, b_targetsmell, b_targetsight) |> 
+  select(-(.chain:.draw))
+
+smell_posts <- smell_stdres_mdl |> 
+  spread_draws(b_Intercept, b_targettaste, b_targettouch, b_targetsight) |> 
+  select(-(.chain:.draw))
+
+sight_posts <- sight_stdres_mdl |> 
+  spread_draws(b_Intercept, b_targettaste, b_targetsmell, b_targettouch) |> 
+  select(-(.chain:.draw))
+
+sound_posts <- sound_stdres_mdl |> 
+  spread_draws(b_Intercept, b_targettaste, b_targetsmell, b_targettouch) |> 
+  select(-(.chain:.draw))
+```
+
+Calculate the predictions for each cell:
+
+```{r}
+# Touch:
+
+touch <- mutate(touch_posts,
+                sound = b_Intercept,
+                taste = b_Intercept + b_targettaste,
+                smell = b_Intercept + b_targetsmell,
+                sight = b_Intercept + b_targetsight) |> 
+  select(-(b_Intercept:b_targetsight))
+
+# Taste:
+
+taste <- mutate(taste_posts,
+                sound = b_Intercept,
+                touch = b_Intercept + b_targettouch,
+                smell = b_Intercept + b_targetsmell,
+                sight = b_Intercept + b_targetsight) |> 
+  select(-(b_Intercept:b_targetsight))
+
+# Smell:
+
+smell <- mutate(smell_posts,
+                sound = b_Intercept,
+                touch = b_Intercept + b_targettouch,
+                taste = b_Intercept + b_targettaste,
+                sight = b_Intercept + b_targetsight) |> 
+  select(-(b_Intercept:b_targetsight))
+
+# Sight:
+
+sight <- mutate(sight_posts,
+                sound = b_Intercept,
+                touch = b_Intercept + b_targettouch,
+                taste = b_Intercept + b_targettaste,
+                smell = b_Intercept + b_targetsmell) |> 
+  select(-(b_Intercept:b_targettouch))
+
+# Sound:
+
+sound <- mutate(sound_posts,
+                sight = b_Intercept,
+                touch = b_Intercept + b_targettouch,
+                taste = b_Intercept + b_targettaste,
+                smell = b_Intercept + b_targetsmell) |> 
+  select(-(b_Intercept:b_targettouch))
+```
+
+Get the 95% intervals for each:
+
+```{r}
+touch_fixefs <- touch |> 
+  pivot_longer(cols = sound:sight,
+               values_to = 'posterior',
+               names_to = 'target') |> 
+  group_by(target) |> 
+  summarize(lower_CI = quantile(posterior, 0.025),
+            upper_CI = quantile(posterior, 0.975),
+            mean = mean(posterior))
+
+taste_fixefs <- taste |> 
+  pivot_longer(cols = sound:sight,
+               values_to = 'posterior',
+               names_to = 'target') |> 
+  group_by(target) |> 
+  summarize(lower_CI = quantile(posterior, 0.025),
+            upper_CI = quantile(posterior, 0.975),
+            mean = mean(posterior))
+
+smell_fixefs <- smell |> 
+  pivot_longer(cols = sound:sight,
+               values_to = 'posterior',
+               names_to = 'target') |> 
+  group_by(target) |> 
+  summarize(lower_CI = quantile(posterior, 0.025),
+            upper_CI = quantile(posterior, 0.975),
+            mean = mean(posterior))
+
+sight_fixefs <- sight |> 
+  pivot_longer(cols = sound:smell,
+               values_to = 'posterior',
+               names_to = 'target') |> 
+  group_by(target) |> 
+  summarize(lower_CI = quantile(posterior, 0.025),
+            upper_CI = quantile(posterior, 0.975),
+            mean = mean(posterior))
+
+sound_fixefs <- sound |> 
+  pivot_longer(cols = sight:smell,
+               values_to = 'posterior',
+               names_to = 'target') |> 
+  group_by(target) |> 
+  summarize(lower_CI = quantile(posterior, 0.025),
+            upper_CI = quantile(posterior, 0.975),
+            mean = mean(posterior))
+```
+
+Make plots of the 95% credible intervals for each target modality, touch:
+
+```{r}
+# Plot core:
+
+touch_p <- touch_fixefs |> 
+  ggplot(aes(x = mean, y = reorder(target, mean))) +
+  geom_vline(xintercept = 0, linetype = 'dashed') +
+  geom_point(pch = 15, size = 2.7) +
+  geom_text(aes(label = target),
+            nudge_y = +0.25,
+            size = 2.8) + 
+  geom_errorbar(aes(xmin = lower_CI, xmax = upper_CI),
+                width = 0.3, linewidth = 0.45)
+
+# Scales and axes:
+
+touch_p <- touch_p +
+  scale_x_continuous(limits = c(-13, 13),
+                     breaks = seq(-12, 12, 2)) +
+  xlab('Posterior of standardized residuals\nTOUCH') +
+  ylab(NULL)
+
+# Cosmetics:
+
+touch_p <- touch_p +
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.x = element_text(margin = margin(t = 10)))
+
+# Show and save:
+
+touch_p
+ggsave('../figures/pdf/touch_target_preferences.pdf',
+       plot = touch_p, width = 4.5, height = 3.2)
+ggsave('../figures/png/touch_target_preferences.png',
+       plot = touch_p, width = 4.5, height = 3.2)
+```
+
+Make plots of the 95% credible intervals for each target modality, taste:
+
+```{r}
+# Plot core:
+
+taste_p <- taste_fixefs |> 
+  ggplot(aes(x = mean, y = reorder(target, mean))) +
+  geom_vline(xintercept = 0, linetype = 'dashed') +
+  geom_point(pch = 15, size = 2.7) +
+  geom_text(aes(label = target),
+            nudge_y = +0.25,
+            size = 2.8) + 
+  geom_errorbar(aes(xmin = lower_CI, xmax = upper_CI),
+                width = 0.3, linewidth = 0.45)
+
+# Scales and axes:
+
+taste_p <- taste_p +
+  scale_x_continuous(limits = c(-13, 13),
+                     breaks = seq(-12, 12, 2)) +
+  xlab('Posterior of standardized residuals\nTASTE') +
+  ylab(NULL)
+
+# Cosmetics:
+
+taste_p <- taste_p +
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.x = element_text(margin = margin(t = 10)))
+
+# Show and save:
+
+taste_p
+ggsave('../figures/pdf/taste_target_preferences.pdf',
+       plot = taste_p, width = 4.5, height = 3.2)
+ggsave('../figures/png/taste_target_preferences.png',
+       plot = taste_p, width = 4.5, height = 3.2)
+```
+
+Make plots of the 95% credible intervals for each target modality, smell:
+
+```{r}
+# Plot core:
+
+smell_p <- smell_fixefs |> 
+  ggplot(aes(x = mean, y = reorder(target, mean))) +
+  geom_vline(xintercept = 0, linetype = 'dashed') +
+  geom_point(pch = 15, size = 2.7) +
+  geom_text(aes(label = target),
+            nudge_y = +0.25,
+            size = 2.8) + 
+  geom_errorbar(aes(xmin = lower_CI, xmax = upper_CI),
+                width = 0.3, linewidth = 0.45)
+
+# Scales and axes:
+
+smell_p <- smell_p +
+  scale_x_continuous(limits = c(-13, 13),
+                     breaks = seq(-12, 12, 2)) +
+  xlab('Posterior of standardized residuals\nSMELL') +
+  ylab(NULL)
+
+# Cosmetics:
+
+smell_p <- smell_p +
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.x = element_text(margin = margin(t = 10)))
+
+# Show and save:
+
+smell_p
+ggsave('../figures/pdf/smell_target_preferences.pdf',
+       plot = smell_p, width = 4.5, height = 3.2)
+ggsave('../figures/png/smell_target_preferences.png',
+       plot = smell_p, width = 4.5, height = 3.2)
+```
+
+Make plots of the 95% credible intervals for each target modality, sight:
+
+```{r}
+# Plot core:
+
+sight_p <- sight_fixefs |> 
+  ggplot(aes(x = mean, y = reorder(target, mean))) +
+  geom_vline(xintercept = 0, linetype = 'dashed') +
+  geom_point(pch = 15, size = 2.7) +
+  geom_text(aes(label = target),
+            nudge_y = +0.25,
+            size = 2.8) + 
+  geom_errorbar(aes(xmin = lower_CI, xmax = upper_CI),
+                width = 0.3, linewidth = 0.45)
+
+# Scales and axes:
+
+sight_p <- sight_p +
+  scale_x_continuous(limits = c(-13, 13),
+                     breaks = seq(-12, 12, 2)) +
+  xlab('Posterior of standardized residuals\nSIGHT') +
+  ylab(NULL)
+
+# Cosmetics:
+
+sight_p <- sight_p +
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.x = element_text(margin = margin(t = 10)))
+
+# Show and save:
+
+sight_p
+ggsave('../figures/pdf/sight_target_preferences.pdf',
+       plot = sight_p, width = 4.5, height = 3.2)
+ggsave('../figures/png/sight_target_preferences.png',
+       plot = sight_p, width = 4.5, height = 3.2)
+```
+
+Make plots of the 95% credible intervals for each target modality, sound:
+
+```{r}
+# Plot core:
+
+sound_p <- sound_fixefs |> 
+  ggplot(aes(x = mean, y = reorder(target, mean))) +
+  geom_vline(xintercept = 0, linetype = 'dashed') +
+  geom_point(pch = 15, size = 2.7) +
+  geom_text(aes(label = target),
+            nudge_y = +0.25,
+            size = 2.8) + 
+  geom_errorbar(aes(xmin = lower_CI, xmax = upper_CI),
+                width = 0.3, linewidth = 0.45)
+
+# Scales and axes:
+
+sound_p <- sound_p +
+  scale_x_continuous(limits = c(-13, 13),
+                     breaks = seq(-12, 12, 2)) +
+  xlab('Posterior of standardized residuals\nSOUND') +
+  ylab(NULL)
+
+# Cosmetics:
+
+sound_p <- sound_p +
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.x = element_text(margin = margin(t = 10)))
+
+# Show and save:
+
+sound_p
+ggsave('../figures/pdf/sound_target_preferences.pdf',
+       plot = sound_p, width = 4.5, height = 3.2)
+ggsave('../figures/png/sound_target_preferences.png',
+       plot = sound_p, width = 4.5, height = 3.2)
+```
+
+Put them all into one plot, lower senses:
+
+```{r}
+# Put all the lower ones together:
+
+lower_p <- touch_p + taste_p + smell_p +
+  plot_layout(ncol = 3, nrow = 1)
+
+# Show and save:
+
+ggsave('../figures/pdf/lower_senses_preferences.pdf',
+       plot = lower_p, width = 4.5 * 3, height = 3.2)
+ggsave('../figures/png/lower_senses_preferences.png',
+       plot = lower_p, width = 4.5 * 3, height = 3.2)
+```
+
+Put them all into one plot, higher senses:
+
+```{r}
+# Put all the lower ones together:
+
+higher_p <- sight_p + sound_p + 
+  plot_layout(ncol = 2, nrow = 1)
+
+# Show and save:
+
+ggsave('../figures/pdf/higher_senses_preferences.pdf',
+       plot = higher_p, width = 4.5 * 2, height = 3.2)
+ggsave('../figures/png/higher_senses_preferences.png',
+       plot = higher_p, width = 4.5 * 2, height = 3.2)
+```
+
+# Posterior probabilities
+
+Posterior probabilities of preferences for touch:
+
+```{r}
+map_df(touch, .f = function(x) sum(x > 0) / nrow(touch))
+```
+
+Posterior probabilities of preferences for taste:
+
+```{r}
+map_df(taste, .f = function(x) sum(x > 0) / nrow(taste))
+```
+
+Posterior probabilities of preferences for smell:
+
+```{r}
+map_df(smell, .f = function(x) sum(x > 0) / nrow(smell))
+```
+
+Posterior probabilities of preferences for sound:
+
+```{r}
+map_df(sound, .f = function(x) sum(x > 0) / nrow(sound))
+```
+
+Posterior probabilities of preferences for sight:
+
+```{r}
+map_df(sight, .f = function(x) sum(x > 0) / nrow(sight))
+```
+
+# Calculate line strengths
+
+Intuitively, it makes sense that what we believe are strong mappings should include two criteria: first, how strong numerically the mapping is, i.e., a large standardized residual indicates a strong deviation from expected counts; second, how certain we are in a preference. For the latter, we can take the width of the 95% credible interval as an indicator. To bring the two measures in relation so that we can plot line widths that are informed both by frequency counts *and* uncertainty, we can divide the posterior mean (representing the strength) by the width of the interval (representing uncertainty).
+
+Merge them together:
+
+```{r}
+fixefs <- bind_rows(touch_fixefs,
+                    taste_fixefs,
+                    smell_fixefs,
+                    sight_fixefs,
+                    sound_fixefs) |> 
+  mutate(width = abs(upper_CI - lower_CI),
+         strength = mean / width)
+```
+
+Add source modalities:
+
+```{r}
+fixefs$source <- c(rep('touch', 4),
+                   rep('taste', 4),
+                   rep('smell', 4),
+                   rep('sight', 4),
+                   rep('sound', 4))
+
+# Relocate:
+
+fixefs <- fixefs |> relocate(source)
+```
+
+Check only the positive ones (the dispreferences just result from over-representation of the preferences):
+
+```{r}
+fixefs <- filter(fixefs, mean > 0)
+```
+
+Sort by the strength:
+
+```{r}
+fixefs |> 
+  arrange(desc(strength)) |> 
+  mutate(illustrator_strength = strength * 3)
+```
+
+What about in terms of just width? (certainty)
+
+```{r}
+fixefs |> 
+  arrange(width)
+```
+
+That makes relatively little sense to report as line width. We are very "certain" in the smell->sound mapping being close to zero...
+
+That said, we could map the width of the 95% CrI onto a color gradient:
+
+```{r}
+widths <- fixefs |> pull(width) |> as.vector()
+
+# Define a color gradient going from white to black with fine granularity:
+
+pal_fnc <- colorRampPalette(colors = c('white', 'black'))
+
+# Fine gradient:
+
+col_df <- tibble(id = 1:100, hex = pal_fnc(100),
+                 values = seq(15, 0, length.out = 100))
+
+# Show:
+
+col_df
+```
+
+Loop through widths and get the closest color values:
+
+```{r}
+# Setup vector to be filled with hex codes for colors:
+
+hexes <- character(length(widths))
+
+# Loop through and find hex value for minimum distance to value:
+
+for (i in seq_along(widths)) {
+  this_width <- widths[i]
+  hexes[i] <- col_df[which.min(abs(this_width - col_df$values)), ]$hex
+}
+
+# Append:
+
+fixefs$hex <- hexes
+```
+
+Show:
+
+```{r}
+fixefs |> 
+  select(-lower_CI, -upper_CI, -strength) |> 
+  arrange(desc(mean))
+```
+
+Let's see how it looks like when we map strength onto the color *and* linewidth instead.
+
+```{r}
+strengths <- fixefs |> pull(strength) |> as.vector()
+
+# Define a color gradient going from white to black with fine granularity:
+
+pal_fnc <- colorRampPalette(colors = c('white', 'black'))
+
+# Fine gradient:
+
+col_df <- tibble(id = 1:100, hex = pal_fnc(100),
+                 values = seq(0, 3.5, length.out = 100))
+
+# Show:
+
+col_df
+```
+
+Loop through widths and get the closest color values:
+
+```{r}
+# Setup vector to be filled with hex codes for colors:
+
+hexes <- character(length(strengths))
+
+# Loop through and find hex value for minimum distance to value:
+
+for (i in seq_along(strengths)) {
+  this_strength <- strengths[i]
+  hexes[i] <- col_df[which.min(abs(this_strength - col_df$values)), ]$hex
+}
+
+# Append:
+
+fixefs$hex_strength <- hexes
+```
+
+For strength, let's multiply it by * 3 to make the lines more visible (this is an innocuous manipulation as it is just a constant).
+
+```{r}
+fixefs |> 
+  mutate(strength_3 = strength * 3) |> 
+  arrange(desc(strength_3))
+```
+
+Sort by just the posterior mean:
+
+```{r}
+fixefs |> 
+  filter(mean > 0) |> 
+  arrange(desc(mean)) |> 
+  mutate(mean_2 = mean * 1.5)
+```
+
+# Plot of this with images as network
+
+Load images:
+
+```{r}
+touch <- readPNG('../figures/logos/touch.png', native = TRUE)
+taste <- readPNG('../figures/logos/taste.png', native = TRUE)
+smell <- readPNG('../figures/logos/smell.png', native = TRUE)
+sight <- readPNG('../figures/logos/sight.png', native = TRUE)
+sound <- readPNG('../figures/logos/sound.png', native = TRUE)
+```
+
+Make a plot of the target preferences. First some random empty points:
+
+```{r}
+df <- tibble(x = c(1, 2),
+             y = c(2, 4))
+```
+
+
+<!-- ```{r} -->
+<!-- target_p <- df |> -->
+<!--   ggplot(aes(x = x, y = y)) + -->
+<!--   # geom_hline(yintercept = 5) + -->
+<!--   scale_x_continuous(limits = c(0, 10)) + -->
+<!--   scale_y_continuous(limits = c(0, 10)) -->
+
+<!-- # Add logos: -->
+
+<!-- target_p <- target_p + -->
+<!--   annotation_custom(rasterGrob(touch, width = 1, height = 1), -->
+<!--                     xmin = 1.5, xmax = 2.5, -->
+<!--                     ymin = 4.5, ymax = 5.5) + -->
+<!--   annotation_custom(rasterGrob(sight, width = 1, height = 1), -->
+<!--                     xmin = 4.5, xmax = 5.5, -->
+<!--                     ymin = 5.5, ymax = 6.5) + -->
+<!--   annotation_custom(rasterGrob(sound, width = 1, height = 1), -->
+<!--                     xmin = 4.5, xmax = 5.5, -->
+<!--                     ymin = 3.5, ymax = 4.5) + -->
+<!--   annotation_custom(rasterGrob(taste, width = 1, height = 1), -->
+<!--                     xmin = 7.5, xmax = 8.5, -->
+<!--                     ymin = 4.5, ymax = 5.5) -->
+
+<!-- # Draw arrows: -->
+
+<!-- target_p <- target_p + -->
+<!--   annotate('segment', -->
+<!--            x = 2.5, -->
+<!--            y = , -->
+<!--            yend = 0.0002, -->
+<!--            arrow = arrow(type = 'closed', length = unit(0.015, 'npc'))) -->
+
+<!-- # Cosmetics: -->
+
+<!-- target_p <- target_p + -->
+<!--   theme_classic() + -->
+<!--   theme(axis.line = element_blank(), -->
+<!--         axis.text = element_blank(), -->
+<!--         axis.title = element_blank(), -->
+<!--         axis.ticks = element_blank()) -->
+
+
+<!-- target_p -->
+<!-- ggsave(plot = target_p, -->
+<!--        filename = '../figures/pdf/target_preferences_network.pdf', -->
+<!--        width = 10, height = 10) -->
+<!-- ggsave(plot = target_p, -->
+<!--        filename = '../figures/png/target_preferences_network.ng', -->
+<!--        width = 10, height = 10) -->
+<!-- ``` -->
+
+
+
+
+
+
+
+# Asymmetry by cell
+
+First loop through everything and add +1 so that all asymmetries can actually be computed.
+
+```{r}
+# Create copy:
+
+plus_one_tabs <- both_tables
+
+# Loop through and add +1 to copy:
+
+for (i in seq_along(plus_one_tabs)) {
+  plus_one_tabs[[i]] <- plus_one_tabs[[i]] + 1
+}
+```
+
+Create all combinations:
+
+```{r}
+# All modalities:
+
+modalities <- c('touch', 'taste', 'smell', 'hearing', 'sight')
+
+# All combinations:
+
+all_combos <- tibble(source = modalities,
+                     target = modalities)
+
+# No same:
+
+all_combos <- tidyr::expand(all_combos, source, target)
+
+# Add empty column:
+
+all_combos$asymmetry <- NA
+
+# Get rid of same cases:
+
+all_combos <- filter(all_combos,
+                     source != target)
+
+# Show:
+
+all_combos
+```
+
+Loop through all tables and compute cell-specific source/target ratios:
+
+```{r}
+# Setup empty object to grow (I'm lazy):
+
+all_res <- c()
+
+# Loop through each table and then through each row of all_combos:
+
+for (i in seq_along(plus_one_tabs)) {
+  # Create copy to fill:
+  
+  temp_df <- all_combos
+  
+  # Extract table:
+  
+  this_tab <- plus_one_tabs[[i]]
+  
+  # Loop through rows of combinations:
+  
+  for (j in 1:nrow(all_combos)) {
+    this_source <- temp_df[j, ]$source
+    this_target <- temp_df[j, ]$target
+    
+    # Source/target ratio for this pair:
+    
+    temp_df[j, ]$asymmetry <- this_tab[this_source, this_target] /
+      this_tab[this_target, this_source]
+  }
+  
+  # Append name:
+  
+  temp_df$table <- names(plus_one_tabs)[i]
+  
+  # Append to main tibble:
+  
+  all_res <- bind_rows(all_res, temp_df)
+}
+```
+
+Check that they are symmetrical:
+
+```{r}
+filter(all_res,
+       (source == 'touch' & target == 'taste') | (source == 'taste' & target == 'touch'))
+```
+
+Check first:
+
+```{r}
+2 / 3
+
+3 / 2
+```
+
+Makes sense.
+
+Get rid of half of them since they are duplicated. We'll do it this way round, from left to right along the table:
+
+- touch <-> taste
+- touch <-> smell
+- touch <-> sound
+- touch <-> sight
+- taste <-> smell
+- taste <-> sound
+- taste <-> sight
+- smell <-> sound
+- smell <-> sight
+- sound <-> sight
+
+```{r}
+all_res <- filter(all_res,
+                  !(source == 'taste' & target == 'touch'),
+                  !(source == 'smell' & target == 'touch'),
+                  !(source == 'hearing' & target == 'touch'),
+                  !(source == 'sight' & target == 'touch'),
+                  !(source == 'smell' & target == 'taste'),
+                  !(source == 'hearing' & target == 'taste'),
+                  !(source == 'sight' & target == 'taste'),
+                  !(source == 'hearing' & target == 'smell'),
+                  !(source == 'sight' & target == 'smell'),
+                  !(source == 'sight' & target == 'hearing'))
+```
+
+Merge `source` and `target` into a pair variable:
+
+```{r}
+all_res <- mutate(all_res,
+                  pair = str_c(source, '_', target))
+```
+
+Check it's the right number of levels:
+
+```{r}
+distinct(all_res, pair)
+```
+
+Yes, it should be 10 pairs.
+
+Make this into a log asymmetry variable:
+
+```{r}
+all_res <- mutate(all_res,
+                  log_asymmetry = log(asymmetry))
+```
+
+Reappend language:
+
+```{r}
+all_res <- left_join(all_res,
+                     select(metadata, table_title, language),
+                     by = c('table' = 'table_title'))
+
+# Show:
+
+all_res
+```
+
+# Model pairwise asymmetries
+
+Build a model — take the priors from the source/target ratio model (see `analysis2_source_target_ratios.Rmd`).
+
+```{r}
+my_priors <- c(prior(normal(0, 1), class = Intercept),
+               prior(normal(0, 1), class = b),
+               prior(student_t(3, 0, 2.5), class = sd), # df = 3, mu = 0, sigma = 2.5
+               prior(lkj(2), class = cor))
+```
+
+Build the model:
+
+```{r eval = FALSE}
+asymmetry_mdl <- brm(log_asymmetry ~ 
+                  
+                       # Fixed effects:
+                  
+                       1 + pair +
+                  
+                       # Random effects:
+                  
+                       (1 + pair|language),
+                
+                data = all_res,
+                family = gaussian,
+                
+                # Priors:
+                
+                prior = my_priors,
+                
+                # MCMC settings:
+                
+                seed = 42,
+                cores = 4,
+                chains = 4,
+                iter = 6000,
+                warmup = 4000,
+                control = list(adapt_delta = 0.99),
+                save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(asymmetry_mdl, file = '../models/asymmetry_mdl.RData')
+```
+
+Load the pre-compiled model:
+
+```{r}
+load('../models/asymmetry_mdl.RData')
+```
+
+Assess whether this is a plausible data-generating process:
+
+```{r}
+pp_check(asymmetry_mdl, ndraws = 100)
+```
+
+Looks quite good!
+
+Check the model:
+
+```{r}
+asymmetry_mdl
+```
+
+# Plot 95% intervals
+
+Get the posterior samples from the model:
+
+```{r}
+posts <- asymmetry_mdl |> 
+  spread_draws(b_Intercept, b_pairsmell_hearing,
+               b_pairsmell_sight, b_pairtaste_hearing,
+               b_pairtaste_sight, b_pairtaste_smell,
+               b_pairtouch_hearing, b_pairtouch_sight,
+               b_pairtouch_smell, b_pairtouch_taste)
+```
+
+Fill out the regression equation for all five cells of the stats:
+
+```{r}
+posts <- posts |> 
+  mutate(smell_sound = b_Intercept + b_pairsmell_hearing,
+         smell_sight = b_Intercept + b_pairsmell_sight,
+         taste_sound = b_Intercept + b_pairtaste_hearing,
+         taste_sight = b_Intercept + b_pairtaste_sight,
+         taste_smell = b_Intercept + b_pairtaste_smell,
+         touch_sound = b_Intercept + b_pairtouch_hearing,
+         touch_sight = b_Intercept + b_pairtouch_sight,
+         touch_smell = b_Intercept + b_pairtouch_smell,
+         touch_taste = b_Intercept + b_pairtouch_taste) |> 
+  rename(sound_sight = b_Intercept) |> 
+  select(-(b_pairsmell_hearing:b_pairtouch_taste),
+         -(.chain:.draw))
+
+# Show:
+
+posts
+```
+
+Compute relevant stats... need to make it long format for that:
+
+```{r}
+posts_long <- posts |>
+  pivot_longer(cols = sound_sight:touch_taste,
+               names_to = 'pair',
+               values_to = 'log_ratio') |> 
+  arrange(pair)
+
+# Show long format:
+
+posts_long
+```
+
+Compute 95% credible interval and means:
+
+```{r}
+fixefs <- posts_long |> 
+  group_by(pair) |> 
+  summarize(lower_CI = quantile(log_ratio, 0.025),
+            upper_CI = quantile(log_ratio, 0.975),
+            estimate = mean(log_ratio))
+
+# Show:
+
+fixefs
+```
+
+Split into pairs:
+
+```{r}
+fixefs <- separate(fixefs, pair,
+                   into = c('first', 'second'), remove = FALSE)
+```
+
+Order them by strength:
+
+```{r}
+fixefs <- arrange(fixefs, desc(estimate))
+
+# Sort pair by order:
+
+fixefs <- fixefs |> 
+  mutate(pair = factor(pair, levels = rev(fixefs$pair)))
+```
+
+Make a plot out of this:
+
+```{r}
+fixefs |> 
+  ggplot() +
+  geom_vline(xintercept = 0, linetype = 'dashed') +
+  geom_errorbar(aes(xmin = lower_CI, xmax = upper_CI, y = 0),
+                width = 0.3, linewidth = 0.45) +
+  geom_point(aes(y = 0, x = estimate),
+             pch = 15) +
+  ylab(NULL) +
+  ylim(-0.5, 0.5) + 
+  xlim(-4, +4)  +
+  facet_wrap(~pair,
+             nrow = 10) +
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.line.y = element_blank(),
+        strip.background = element_rect(fill = 'grey88'))
+
+ggsave('../figures/png/pairwise_asymmetries.png',
+       height = 10, width = 4.5)
+```
+
+
+Build the plot:
+
+```{r}
+# Set x-axis columsn for left and right:
+
+xmin_left <- -3.5 - 0.5
+xmax_left <- -2.7 - 0.5
+xmin_right <- xmin_left * -1 + 0.5
+xmax_right <- xmax_left * -1 + 0.5
+
+# Plot core:
+
+pairwise_p <- fixefs |> 
+  ggplot(aes(y = pair)) +
+  geom_vline(xintercept = 0, linetype = 'dashed') +
+  geom_errorbar(aes(xmin = lower_CI, xmax = upper_CI),
+                width = 0.3, linewidth = 0.75) +
+  geom_point(aes(x = estimate),
+             pch = 15, size = 2)
+
+# Axes and labels:
+
+pairwise_p <- pairwise_p +
+  xlab('Asymmetry') +
+  ylab(NULL) +
+  scale_x_continuous(limits = c(-4.2, +4.2),
+                     breaks = -4:4)
+
+# Cosmetics:
+
+pairwise_p <- pairwise_p +
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.line.y = element_blank(),
+        strip.background = element_rect(fill = 'grey88'),
+        axis.title.x = element_text(face = 'bold',
+                                    margin = margin(t = 10)))
+
+# Add image annotations, first, left column:
+
+pairwise_p <- pairwise_p +
+  annotation_custom(rasterGrob(touch, width = 1, height = 1),
+                    xmin = xmin_left, xmax = xmax_left,
+                    ymin = 9.75, ymax = 10.25) +
+  annotation_custom(rasterGrob(touch, width = 1, height = 1),
+                    xmin = xmin_left, xmax = xmax_left,
+                    ymin = 8.75, ymax = 9.25) +
+  annotation_custom(rasterGrob(taste, width = 1, height = 1),
+                    xmin = xmin_left, xmax = xmax_left,
+                    ymin = 7.75, ymax = 8.25) +
+  annotation_custom(rasterGrob(touch, width = 1, height = 1),
+                    xmin = xmin_left, xmax = xmax_left,
+                    ymin = 6.75, ymax = 7.25) +
+  annotation_custom(rasterGrob(taste, width = 1, height = 1),
+                    xmin = xmin_left, xmax = xmax_left,
+                    ymin = 5.75, ymax = 6.25) +
+  annotation_custom(rasterGrob(taste, width = 1, height = 1),
+                    xmin = xmin_left, xmax = xmax_left,
+                    ymin = 4.75, ymax = 5.25) +
+  annotation_custom(rasterGrob(touch, width = 1, height = 1),
+                    xmin = xmin_left, xmax = xmax_left,
+                    ymin = 3.75, ymax = 4.25) +
+  annotation_custom(rasterGrob(smell, width = 1, height = 1),
+                    xmin = xmin_left, xmax = xmax_left,
+                    ymin = 2.75, ymax = 3.25) +
+  annotation_custom(rasterGrob(smell, width = 1, height = 1),
+                    xmin = xmin_left, xmax = xmax_left,
+                    ymin = 1.75, ymax = 2.25) +
+  annotation_custom(rasterGrob(sound, width = 1, height = 1),
+                    xmin = xmin_left, xmax = xmax_left,
+                    ymin = 0.75, ymax = 1.25)
+
+# Add image annotations, second, right column:
+
+pairwise_p <- pairwise_p +
+  annotation_custom(rasterGrob(sound, width = 1, height = 1),
+                    xmin = xmin_right, xmax = xmax_right,
+                    ymin = 9.75, ymax = 10.25) +
+  annotation_custom(rasterGrob(sight, width = 1, height = 1),
+                    xmin = xmin_right, xmax = xmax_right,
+                    ymin = 8.75, ymax = 9.25) +
+  annotation_custom(rasterGrob(sound, width = 1, height = 1),
+                    xmin = xmin_right, xmax = xmax_right,
+                    ymin = 7.75, ymax = 8.25) +
+  annotation_custom(rasterGrob(smell, width = 1, height = 1),
+                    xmin = xmin_right, xmax = xmax_right,
+                    ymin = 6.75, ymax = 7.25) +
+  annotation_custom(rasterGrob(smell, width = 1, height = 1),
+                    xmin = xmin_right, xmax = xmax_right,
+                    ymin = 5.75, ymax = 6.25) +
+  annotation_custom(rasterGrob(sight, width = 1, height = 1),
+                    xmin = xmin_right, xmax = xmax_right,
+                    ymin = 4.75, ymax = 5.25) +
+  annotation_custom(rasterGrob(taste, width = 1, height = 1),
+                    xmin = xmin_right, xmax = xmax_right,
+                    ymin = 3.75, ymax = 4.25) +
+  annotation_custom(rasterGrob(sound, width = 1, height = 1),
+                    xmin = xmin_right, xmax = xmax_right,
+                    ymin = 2.75, ymax = 3.25) +
+  annotation_custom(rasterGrob(sight, width = 1, height = 1),
+                    xmin = xmin_right, xmax = xmax_right,
+                    ymin = 1.75, ymax = 2.25) +
+  annotation_custom(rasterGrob(sight, width = 1, height = 1),
+                    xmin = xmin_right, xmax = xmax_right,
+                    ymin = 0.75, ymax = 1.25)
+
+# Show and save:
+
+pairwise_p
+ggsave('../figures/png/pairwise_asymmetries.png',
+       height = 10, width = 5.5)
+ggsave('../figures/pdf/pairwise_asymmetries.pdf',
+       height = 10, width = 5.5)
+```
+
+# Whole-scale all cell analysis
+
+## Aggregate proportion table
+
+For a first picture of purely descriptive statistics, let's look at each cell's percentage, divided by the overall table total. For this, we loop through all tables and simply add up all counts, then divide by the total.
+
+```{r}
+# Create empty matrix to be filled with counts:
+
+M <- c(NA, 0, 0, 0, 0,
+       0, NA, 0, 0, 0,
+       0, 0, NA, 0, 0,
+       0, 0, 0, NA, 0,
+       0, 0, 0, 0, NA)
+
+# Loop through and add:
+
+for (i in seq_along(both_tables)) {
+  M <- M + both_tables[[i]]
+}
+
+# Divid by total, round and multiply by 100:
+
+round(M / sum(M, na.rm = TRUE), 2) * 100
+```
+
+Touch to hearing (22%) and sight to hearing (21%) dominate the picture, followed by touch to sight (18%). Taste has a more diffuse pattern, preferentially latching onto sight (11%), then hearing (7%), then smell (4%). Interestingly, the "reverse" mapping of sight to touch is also not too uncommon (5%).
+
+The problem with these descriptive statistics is that they are biased by few studies (e.g., Zhao et al. 2019, Winter 2019) with overall higher counts.
+
+## Weighted mean table
+
+In a more complicated procedure, we can first calculate the percentages separately for each table, then average the percentages weighted by table size. If we can get our list of tables somehow into tidyverse format, the next steps should be easier. Let's work on that first.
+
+```{r}
+# Names of all senses, in correct order:
+
+sense_names <- colnames(both_tables[[i]])
+
+# These will be the row names, which are going to be lost from data frame to tibble conversion:
+
+sense_names_rep <- rep(sense_names, each = 5)
+
+# Set up empty results tibble:
+
+df_res <- tibble()
+
+# Loop through, extract table, and append to results after making into proper tibble:
+
+for (i in seq_along(both_tables)) {
+  # Extract table:
+  
+  M <- both_tables[[i]]
+  
+  # Make this into a nice tibble with source, target, and cell count as column:
+  
+  df <- data.frame(M) |>
+    tibble() |> 
+    pivot_longer(touch:sight,
+                 values_to = 'count',
+                 names_to = 'target') |> 
+    mutate(source = sense_names_rep) |> # add row names back in
+    select(source, target, count) # reorder
+  
+  # Omit the unimodal `NA` cases:
+  
+  df <- filter(df, !is.na(count))
+  
+  # Bind to results data frame:
+  
+  df_res <- bind_rows(df_res, df)
+}
+
+# Re-append the names:
+
+df_res$dataset <- rep(names(both_tables), each = 20)
+
+# Reorder:
+
+df_res <- select(df_res, dataset, source:count)
+
+# Show:
+
+df_res
+```
+
+Looks good. Now we can append the totals for each dataset, and then calculate proportions:
+
+```{r}
+df_res <- df_res |> 
+  group_by(dataset) |> 
+  mutate(total = sum(count),
+         prop = count / total)
+
+# Show:
+
+df_res
+```
+
+Beautiful.
+
+Next, we need to compute the weighted averages for each pair!
+
+```{r}
+# Create empty matrix to be filled with weighted percentages:
+
+M <- matrix(c(NA, 0, 0, 0, 0,
+              0, NA, 0, 0, 0,
+              0, 0, NA, 0, 0,
+              0, 0, 0, NA, 0,
+              0, 0, 0, 0, NA),
+            nrow = 5)
+
+# Add row names and column names to this:
+
+rownames(M) <- sense_names
+colnames(M) <- sense_names
+
+# Create a new identifier variable for each pair by pasting the two cols together:
+
+df_res <- mutate(df_res, ID = str_c(source, ':', target))
+
+# Extract all IDs:
+
+IDs <- df_res |> pull(ID) |> unique()
+
+# Loop through IDs:
+
+for (i in seq_along(IDs)) {
+  # Extract subset:
+  
+  df_sub <- filter(df_res, ID == IDs[i])
+  
+  # Calculate mean weighted by total dataset size:
+  
+  M_w <- weighted.mean(df_sub$prop, w = df_sub$total)
+  
+  # Put into relevant part of table, first, where to?
+  # Split ID string:
+  
+  these_mods <- unlist(str_split(IDs[i], pattern = ':'))
+  
+  # Put weighted mean into the matrix for that cell:
+  
+  M[these_mods[1], these_mods[2]] <- M_w
+}
+
+# Round and multiply by 100:
+
+round(M, 2) * 100
+```
+
+Makes no difference whatsoever.
+
+## Bayesian model of each individual cell
+
+We need to put the language information back into the table so that we can fit a random effect.
+
+```{r}
+df_res <- left_join(df_res,
+                    select(props, dataset, language))
+```
+
+Mixed beta regression model, so, analyzing the raw proportions:
+
+```{r eval = FALSE}
+beta_mdl <- brm(bf(prop ~ 1 +
+                  
+                  # Fixed effects:
+                  
+                  ID +
+                  
+                  # Random effects:
+                  
+                  (1 + ID||language),
+                  phi ~ 1 + ID),
+                
+                data = mutate(df_res,
+                              prop = if_else(prop == 0,
+                                             0.0001, prop)),
+                
+                family = Beta,
+                
+                # MCMC settings:
+                        
+                seed = 42, cores = 4, chains = 4,
+                iter = 9000, warmup = 6000,
+                control = list(adapt_delta = 0.99),
+                save_pars = save_pars(all = TRUE))
+
+# Save the model:
+
+save(beta_mdl, file = '../models/beta_mdl.RData')
+```
+
+Load model:
+
+```{r}
+load('../models/beta_mdl.RData')
+```
+
+Check priors recommended for this beta model:
+
+```{r}
+prior_summary(beta_mdl)
+```
+
+Check model:
+
+```{r}
+beta_mdl
+```
+
+Check effects:
+
+```{r fig.width = 12}
+conditional_effects(beta_mdl)
+```
+
+Extract those:
+
+```{r}
+beta_effects <- conditional_effects(beta_mdl)
+
+# Extract table of posterior estimates:
+
+preds <- beta_effects$ID
+
+# Clean:
+
+preds <- select(preds, ID, estimate__,
+                lower__, upper__) |> 
+  rename(estimate = estimate__,
+         lower_CI = lower__,
+         upper_CI = upper__)
+```
+
+Transform to percentages and round to two digits:
+
+```{r}
+preds <- mutate(preds,
+                # Percentages:
+                
+                estimate = estimate * 100,
+                lower_CI = lower_CI * 100,
+                upper_CI = upper_CI * 100,
+                
+                # Rounding:
+                
+                estimate = round(estimate, 1),
+                lower_CI = round(lower_CI, 1),
+                upper_CI = round(upper_CI, 1))
+
+# Show:
+
+preds
+```
+
+## Over 5% threshold
+
+Take all the modalities for which we are certain they are over 5%.
+
+```{r}
+posts <- beta_mdl |> 
+  spread_draws(b_Intercept, # hearing to sight mapping
+               `b_IDhearing:taste`,
+               `b_IDhearing:touch`,
+               `b_IDsight:hearing`,
+               `b_IDsight:smell`,
+               `b_IDsight:taste`,
+               `b_IDsight:touch`,
+               `b_IDsmell:hearing`,
+               `b_IDsmell:sight`,
+               `b_IDsmell:taste`,
+               `b_IDsmell:touch`,
+               `b_IDtaste:hearing`,
+               `b_IDtaste:sight`,
+               `b_IDtaste:smell`,
+               `b_IDtaste:touch`,
+               `b_IDtouch:hearing`,
+               `b_IDtouch:sight`,
+               `b_IDtouch:smell`,
+               `b_IDtouch:taste`,
+               `b_IDhearing:smell`,
+               `b_IDtouch:taste`)
+
+# Rename:
+
+colnames(posts) <- str_replace(colnames(posts),
+                               'b_ID', '')
+colnames(posts) <- str_replace(colnames(posts),
+                               ':', '_to_')
+
+# Get rid of unwanted columns:
+
+posts <- select(posts,
+                -.chain,
+                -.iteration,
+                -.draw)
+
+# Rename intercept column to what it is already:
+
+posts <- rename(posts,
+                hearing_to_sight = b_Intercept)
+
+# Add the intercept to all remaining ones:
+
+posts <- mutate(posts,
+                hearing_to_taste = hearing_to_sight + hearing_to_taste,
+                hearing_to_touch = hearing_to_sight + hearing_to_touch,
+                sight_to_hearing = hearing_to_sight + sight_to_hearing,
+                sight_to_smell = hearing_to_sight + sight_to_smell,
+                sight_to_taste = hearing_to_sight + sight_to_taste,
+                sight_to_touch = hearing_to_sight + sight_to_touch,
+                smell_to_hearing = hearing_to_sight + smell_to_hearing,
+                smell_to_sight = hearing_to_sight + smell_to_sight,
+                smell_to_taste = hearing_to_sight + smell_to_taste,
+                smell_to_touch = hearing_to_sight + smell_to_touch,
+                taste_to_hearing = hearing_to_sight + taste_to_hearing,
+                taste_to_sight = hearing_to_sight + taste_to_sight,
+                taste_to_smell = hearing_to_sight + taste_to_smell,
+                taste_to_touch = hearing_to_sight + taste_to_touch,
+                touch_to_hearing = hearing_to_sight + touch_to_hearing,
+                touch_to_sight = hearing_to_sight + touch_to_sight,
+                touch_to_smell = hearing_to_sight + touch_to_smell,
+                touch_to_taste = hearing_to_sight + touch_to_taste,
+                hearing_to_smell = hearing_to_sight + hearing_to_smell)
+
+# Make into percentages using logistic function:
+
+posts_mu <- mutate_all(posts, plogis)
+
+# Check:
+
+posts_mu
+```
+
+To check whether this is what we get with `conditional_effects()` as well, let's double-check the posterior means:
+
+```{r}
+summarize_all(posts_mu, mean) |> print(width = Inf)
+```
+
+They make sense.
+
+```{r}
+summarize_all(posts_mu, function(x) sum(x > 0.05) / 12000) |> 
+  print(width = Inf)
+```
+
+We are 100% certain that touch->sound, touch->sight, sight->sound are over 5%. We are >80% certain that taste->sound and taste->sight are additional mappings. We are only about ~69% certain that sound->sight exceeds more than 5% of all cases.
+
+So, let's take those values and map them onto a size gradient, focusing on the closest percentage. Black will be set to the maximum of 25.5%, the mapping with the highest percentage. And grey will be set to 0.
+
+```{r}
+pal_fnc <- colorRampPalette(colors = c('black', 'white'))
+
+# Fine gradient:
+
+col_df <- tibble(id = 1:100, hex = pal_fnc(100),
+                 values = seq(25, 0, length.out = 100))
+```
+
+Loop through widths and get the closest color values:
+
+```{r}
+all_vals <- c(25.5, 14.3, 15.5, 6.4, 6.2)
+
+# Setup vector to be filled with hex codes for colors:
+
+hexes <- character(length(all_vals))
+
+# Loop through and find hex value for minimum distance to value:
+
+for (i in seq_along(all_vals)) {
+  this_val <- all_vals[i]
+  hexes[i] <- col_df[which.min(abs(this_val - col_df$values)), ]$hex
+}
+
+# Show the values:
+
+hexes
+```
+
+What is a sensible arrow size scale?
+
+```{r}
+all_vals / 2.5
+```
+
+
+
+
+This completes this script.
+
